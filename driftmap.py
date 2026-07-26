@@ -181,6 +181,11 @@ def parse_args() -> argparse.Namespace:
         "--window-radius", type=nonnegative_int, default=3, metavar="PX",
         help="window corner radius (default: 3)",
     )
+    parser.add_argument(
+        "--show-fullscreen",
+        action="store_true",
+        help="keep the map visible on outputs with a fullscreen window",
+    )
     return parser.parse_args()
 
 
@@ -211,6 +216,21 @@ def output_for_monitor(
         (output for output in outputs if output.get("name") == monitor_name),
         None,
     ) or active_output(state)
+
+
+def monitor_is_fullscreen(
+    state: dict[str, Any] | None, monitor_name: str | None
+) -> bool:
+    if state is None:
+        return False
+    output = output_for_monitor(state, monitor_name)
+    if output is None:
+        return False
+    output_name = output.get("name")
+    return any(
+        fullscreen.get("output") == output_name
+        for fullscreen in state.get("fullscreen", [])
+    )
 
 
 class StateSubscription:
@@ -446,6 +466,14 @@ class MinimapApplication(Gtk.Application):
         self.subscription = StateSubscription(self.update_state)
         self.maps_visible = False
 
+    def _update_window_visibility(self) -> None:
+        for window in self.windows:
+            fullscreen_hidden = (
+                not self.config.show_fullscreen
+                and monitor_is_fullscreen(self.state, window.monitor_name)
+            )
+            window.set_visible(self.maps_visible and not fullscreen_hidden)
+
     def do_activate(self) -> None:
         if not self.windows:
             monitors = Gdk.Display.get_default().get_monitors()
@@ -455,23 +483,20 @@ class MinimapApplication(Gtk.Application):
                 if self.state is not None:
                     window.update_state(self.state)
                 self.windows.append(window)
-                window.set_visible(True)
-            self.subscription.start()
             self.maps_visible = True
+            self._update_window_visibility()
+            self.subscription.start()
             self.hold()
             return
 
         self.maps_visible = not self.maps_visible
-        for window in self.windows:
-            if self.maps_visible:
-                window.set_visible(True)
-            else:
-                window.set_visible(False)
+        self._update_window_visibility()
 
     def update_state(self, state: dict[str, Any]) -> None:
         self.state = state
         for window in self.windows:
             window.update_state(state)
+        self._update_window_visibility()
 
     def do_shutdown(self) -> None:
         self.subscription.stop()
