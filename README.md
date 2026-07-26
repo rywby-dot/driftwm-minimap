@@ -267,7 +267,8 @@ driftmap \
   --canvas-radius 12 \
   --window-radius 3 \
   --snap 8 \
-  --show-fullscreen
+ # --show-fullscreen \
+ # --snap-off   #can not be use with --snap <PX>
 ```
 
 Run `driftmap --help` for the generated command-line reference.
