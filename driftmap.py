@@ -159,8 +159,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--frame-color", "--viewport-color", dest="frame_color",
-        type=parse_hex_color, default=(0.7231, 0.7231, 0.7231),
-        metavar="HEX", help="current viewport outline color (default: #dddddd)",
+        type=parse_hex_color, default=(0.9216, 0.7682, 0.2159),
+        metavar="HEX", help="current viewport outline color (default: #f6e380)",
     )
     parser.add_argument(
         "--frame-opacity", "--viewport-opacity", dest="frame_opacity",
