@@ -1,0 +1,19 @@
+[project]
+name = "driftwm-minimap"
+version = "0.1.0"
+description = "Click-through layer-shell minimap for the driftwm infinite canvas"
+requires-python = ">=3.11"
+dependencies = [
+    "pycairo>=1.27",
+    "PyGObject>=3.50",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+only-include = ["driftmap.py"]
+
+[project.scripts]
+driftmap = "driftmap:main"
