@@ -230,7 +230,7 @@ autostart = [
     Default: 0.3 8.
 
 --dot-radius PX
-    Radius shared by bookmark and home points. Default: 2.
+    Radius shared by bookmark and home points. 0 disables points. Default: 2.
 
 --canvas-radius PX, --radius PX
     Canvas corner radius. Zero disables rounding. Default: 12.
@@ -266,7 +266,8 @@ driftmap \
   --canvas-radius 12 \
   --window-radius 3 \
   --snap 8 \
-  --show-fullscreen
+ # --show-fullscreen \
+ # --snap-off   #can not be use with --snap <PX>
 ```
 
 Run `driftmap --help` for the generated command-line reference.
