@@ -230,7 +230,8 @@ autostart = [
     Default: 0.3 8.
 
 --dot-radius PX
-    Radius shared by bookmark and home points. Default: 2.
+    Radius shared by bookmark and home points. Zero disables the points and
+    their hitboxes. Default: 2.
 
 --canvas-radius PX, --radius PX
     Canvas corner radius. Zero disables rounding. Default: 12.

@@ -269,7 +269,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--dot-radius", type=nonnegative_float, default=2, metavar="PX",
-        help="home and bookmark point radius (default: 2)",
+        help="home and bookmark point radius; 0 disables points (default: 2)",
     )
     parser.add_argument(
         "--canvas-radius", "--radius", dest="canvas_radius",
@@ -1282,6 +1282,9 @@ class MinimapWindow(Gtk.ApplicationWindow):
                 viewport_height,
             )
             context.stroke()
+
+        if self.config.dot_radius == 0:
+            return
 
         markers: list[Marker] = []
         bookmark_hover_opacity, bookmark_hitbox_padding = (
