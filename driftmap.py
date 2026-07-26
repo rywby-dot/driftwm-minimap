@@ -10,6 +10,8 @@ import math
 import os
 import socket
 import sys
+import tomllib
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +27,24 @@ def control_socket_path() -> Path:
 def send_fast_control_command() -> None:
     """Contact the running instance without paying GTK's startup cost."""
     arguments = sys.argv[1:]
-    if arguments not in (["--show"], ["--toggle"]):
+    command: str | None = None
+    if arguments == ["--show"]:
+        command = "show"
+    elif len(arguments) == 3 and arguments[0] == "--toggle":
+        try:
+            scale, alpha = float(arguments[1]), float(arguments[2])
+        except ValueError:
+            return
+        if math.isfinite(scale) and scale > 0 and math.isfinite(alpha) and 0 <= alpha <= 1:
+            command = f"toggle:{scale}:{alpha}"
+    elif len(arguments) == 2 and arguments[0] == "--toggle-fullscreen":
+        try:
+            alpha = float(arguments[1])
+        except ValueError:
+            return
+        if math.isfinite(alpha) and 0 <= alpha <= 1:
+            command = f"toggle-fullscreen:{alpha}"
+    if command is None:
         return
     if not os.environ.get("WAYLAND_DISPLAY"):
         return
@@ -33,7 +52,7 @@ def send_fast_control_command() -> None:
     connection = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
     try:
         connection.sendto(
-            arguments[0].removeprefix("--").encode(),
+            command.encode(),
             str(control_socket_path()),
         )
     except OSError:
@@ -142,8 +161,30 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     command.add_argument(
         "--toggle",
+        nargs=2,
+        type=float,
+        metavar=("X", "Y"),
+        help="toggle a profile with size multiplier X and opacity Y",
+    )
+    command.add_argument(
+        "--toggle-fullscreen",
+        type=opacity,
+        metavar="Y",
+        help="toggle an interactive fullscreen profile with opacity Y",
+    )
+    snap = parser.add_mutually_exclusive_group()
+    snap.add_argument(
+        "--snap",
+        dest="minimap_snap",
+        type=positive_float,
+        default=8.0,
+        metavar="PX",
+        help="minimap snap activation distance in pixels (default: 8)",
+    )
+    snap.add_argument(
+        "--snap-off",
         action="store_true",
-        help="toggle between the normal and large 0.8-opacity profiles",
+        help="disable snapping while dragging windows on the minimap",
     )
     parser.add_argument(
         "--width", type=positive_int, default=320, metavar="PX",
@@ -226,7 +267,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="keep the map visible on outputs with a fullscreen window",
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.toggle is not None:
+        scale, alpha = args.toggle
+        if not math.isfinite(scale) or scale <= 0:
+            parser.error("--toggle X must be greater than zero")
+        if not math.isfinite(alpha) or not 0 <= alpha <= 1:
+            parser.error("--toggle Y must be between 0 and 1")
+    return args
 
 
 def ipc_socket_path() -> Path:
@@ -271,6 +319,140 @@ def monitor_is_fullscreen(
         fullscreen.get("output") == output_name
         for fullscreen in state.get("fullscreen", [])
     )
+
+
+@dataclass(frozen=True)
+class SnapConfig:
+    enabled: bool = True
+    gap: float = 12.0
+    distance: float = 24.0
+    break_force: float = 32.0
+    corners: bool = False
+    centers: bool = False
+
+
+@dataclass
+class AxisSnap:
+    snapped_pos: float
+    natural_at_engage: float
+
+
+def load_snap_config() -> SnapConfig:
+    config_home = Path(
+        os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")
+    )
+    path = config_home / "driftwm" / "config.toml"
+    try:
+        values = tomllib.loads(path.read_text()).get("snap", {})
+    except (OSError, tomllib.TOMLDecodeError):
+        values = {}
+
+    defaults = SnapConfig()
+    return SnapConfig(
+        enabled=bool(values.get("enabled", defaults.enabled)),
+        gap=max(0.0, float(values.get("gap", defaults.gap))),
+        distance=max(0.0, float(values.get("distance", defaults.distance))),
+        break_force=max(
+            0.0, float(values.get("break_force", defaults.break_force))
+        ),
+        corners=bool(values.get("corners", defaults.corners)),
+        centers=bool(values.get("centers", defaults.centers)),
+    )
+
+
+def interval_distance(low: float, high: float, other_low: float, other_high: float) -> float:
+    if high < other_low:
+        return other_low - high
+    if other_high < low:
+        return low - other_high
+    return 0.0
+
+
+def find_snap_candidate(
+    natural_low: float,
+    extent: float,
+    perp_low: float,
+    perp_high: float,
+    horizontal: bool,
+    others: list[tuple[float, float, float, float]],
+    config: SnapConfig,
+    threshold: float,
+) -> float | None:
+    natural_high = natural_low + extent
+    best: tuple[float, float] | None = None
+
+    def candidate(position: float, distance: float) -> None:
+        nonlocal best
+        if distance < threshold and (best is None or distance < best[1]):
+            best = (position, distance)
+
+    for x_low, x_high, y_low, y_high in others:
+        if horizontal:
+            other_low, other_high = x_low, x_high
+            other_perp_low, other_perp_high = y_low, y_high
+        else:
+            other_low, other_high = y_low, y_high
+            other_perp_low, other_perp_high = x_low, x_high
+
+        overlaps = (
+            perp_high > other_perp_low and other_perp_high > perp_low
+        )
+        alignment_eligible = (
+            not overlaps
+            and interval_distance(
+                perp_low, perp_high, other_perp_low, other_perp_high
+            )
+            < config.gap + threshold
+        )
+        if not overlaps and not (
+            alignment_eligible and (config.corners or config.centers)
+        ):
+            continue
+
+        if overlaps:
+            candidate(
+                other_low - config.gap - extent,
+                abs(natural_high - other_low),
+            )
+            candidate(other_high + config.gap, abs(natural_low - other_high))
+        if config.corners and alignment_eligible:
+            candidate(other_low, abs(natural_low - other_low))
+            candidate(other_high - extent, abs(natural_high - other_high))
+        if config.centers and alignment_eligible:
+            other_center = (other_low + other_high) / 2
+            candidate(
+                other_center - extent / 2,
+                abs(natural_low + extent / 2 - other_center),
+            )
+
+    return best[0] if best is not None else None
+
+
+def update_axis_snap(
+    snap: AxisSnap | None,
+    cooldown: float | None,
+    natural_pos: float,
+    candidate: float | None,
+    threshold: float,
+    break_force: float,
+) -> tuple[float, AxisSnap | None, float | None]:
+    if snap is not None:
+        if snap.snapped_pos > snap.natural_at_engage:
+            retreat = snap.natural_at_engage - natural_pos
+            overshoot = natural_pos - snap.snapped_pos
+        else:
+            retreat = natural_pos - snap.natural_at_engage
+            overshoot = snap.snapped_pos - natural_pos
+        if retreat >= break_force or overshoot >= break_force:
+            return natural_pos, None, snap.snapped_pos
+        return snap.snapped_pos, snap, cooldown
+
+    if cooldown is not None and abs(natural_pos - cooldown) > threshold:
+        cooldown = None
+    if cooldown is None and candidate is not None:
+        snap = AxisSnap(candidate, natural_pos)
+        return candidate, snap, cooldown
+    return natural_pos, snap, cooldown
 
 
 class StateSubscription:
@@ -359,6 +541,42 @@ class StateSubscription:
         return True
 
 
+class CommandConnection:
+    """Small persistent IPC connection for interactive minimap commands."""
+
+    def __init__(self) -> None:
+        self.connection: socket.socket | None = None
+
+    def close(self) -> None:
+        if self.connection is not None:
+            self.connection.close()
+            self.connection = None
+
+    def send(self, *requests: object) -> None:
+        payload = b"".join(
+            json.dumps(request, separators=(",", ":")).encode() + b"\n"
+            for request in requests
+        )
+        for attempt in range(2):
+            try:
+                if self.connection is None:
+                    self.connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                    self.connection.connect(str(ipc_socket_path()))
+                    self.connection.setblocking(False)
+                else:
+                    try:
+                        while self.connection.recv(65536):
+                            pass
+                    except BlockingIOError:
+                        pass
+                self.connection.sendall(payload)
+                return
+            except (BlockingIOError, OSError, RuntimeError) as error:
+                self.close()
+                if attempt:
+                    print(f"driftwm-minimap: IPC command failed: {error}", file=sys.stderr)
+
+
 class ControlServer:
     def __init__(self, on_command) -> None:
         self.on_command = on_command
@@ -406,7 +624,11 @@ class ControlServer:
             command = self.connection.recv(64).decode()
         except (BlockingIOError, UnicodeDecodeError):
             return True
-        if command in {"show", "toggle"}:
+        if (
+            command == "show"
+            or command.startswith("toggle:")
+            or command.startswith("toggle-fullscreen:")
+        ):
             self.on_command(command)
         return True
 
@@ -422,6 +644,28 @@ class MinimapWindow(Gtk.ApplicationWindow):
         self.config = config
         self.monitor_name = monitor.get_connector()
         self.state: dict[str, Any] | None = None
+        self.command_connection = CommandConnection()
+        self.snap_config = load_snap_config()
+        self.minimap_snap_distance = config.minimap_snap
+        self._apply_snap_config(config)
+        self.interactive = False
+        self.view_camera: tuple[float, float] | None = None
+        self.view_zoom = 1.0
+        self.target_view_zoom = 1.0
+        self.zoom_tick_id: int | None = None
+        self.zoom_frame_time: int | None = None
+        self.window_rects: list[tuple[dict[str, Any], float, float, float, float]] = []
+        self.last_canvas_scale = 1.0
+        self.left_press: tuple[float, float, int | None] | None = None
+        self.middle_press: tuple[float, float, int | None] | None = None
+        self.pan_origin: tuple[float, float] | None = None
+        self.move_origin: tuple[int, float, float] | None = None
+        self.move_size: tuple[float, float] | None = None
+        self.snap_others: list[tuple[float, float, float, float]] = []
+        self.snap_x: AxisSnap | None = None
+        self.snap_y: AxisSnap | None = None
+        self.snap_cooldown_x: float | None = None
+        self.snap_cooldown_y: float | None = None
         self.area = Gtk.DrawingArea()
         self.area.set_draw_func(self._draw)
         self.area.set_cursor_from_name("default")
@@ -450,19 +694,373 @@ class MinimapWindow(Gtk.ApplicationWindow):
         Gtk.StyleContext.add_provider_for_display(
             self.get_display(), css, Gtk.STYLE_PROVIDER_PRIORITY_USER
         )
-        self.connect("realize", self._make_click_through)
+        self.connect("realize", lambda _window: self._update_input_region())
+        self._install_input_controllers()
 
-    def apply_config(self, config: argparse.Namespace) -> None:
+    def apply_config(
+        self, config: argparse.Namespace, fullscreen: bool = False
+    ) -> None:
         self.config = config
-        self.area.set_content_width(config.width)
-        self.area.set_content_height(config.height)
-        self.set_default_size(config.width, config.height)
+        self._apply_snap_config(config)
+        # With opposite layer-shell anchors, a zero requested dimension asks
+        # the compositor to stretch the surface exactly between those edges.
+        # This avoids one-pixel gaps caused by logical-size rounding.
+        width, height = (0, 0) if fullscreen else (config.width, config.height)
+        for edge in (EDGE.TOP, EDGE.RIGHT, EDGE.BOTTOM, EDGE.LEFT):
+            Gtk4LayerShell.set_anchor(self, edge, fullscreen)
+            Gtk4LayerShell.set_margin(self, edge, 0)
+        if not fullscreen:
+            for edge in POSITION_ANCHORS[config.position]:
+                Gtk4LayerShell.set_anchor(self, edge, True)
+                Gtk4LayerShell.set_margin(self, edge, config.margin)
+        self.area.set_content_width(width)
+        self.area.set_content_height(height)
+        self.set_default_size(width, height)
         self.area.queue_resize()
         self.area.queue_draw()
 
-    @staticmethod
-    def _make_click_through(window: Gtk.Window) -> None:
-        window.get_surface().set_input_region(cairo.Region([]))
+    def _apply_snap_config(self, config: argparse.Namespace) -> None:
+        compositor_snap = load_snap_config()
+        self.snap_config = SnapConfig(
+            enabled=compositor_snap.enabled and not config.snap_off,
+            gap=compositor_snap.gap,
+            distance=compositor_snap.distance,
+            break_force=compositor_snap.break_force,
+            corners=compositor_snap.corners,
+            centers=compositor_snap.centers,
+        )
+        self.minimap_snap_distance = config.minimap_snap
+
+    def set_interactive(self, interactive: bool) -> None:
+        self.interactive = interactive
+        self.view_camera = None
+        self.view_zoom = 1.0
+        self.target_view_zoom = 1.0
+        if self.zoom_tick_id is not None:
+            self.area.remove_tick_callback(self.zoom_tick_id)
+            self.zoom_tick_id = None
+        self.zoom_frame_time = None
+        self.left_press = None
+        self.middle_press = None
+        self.pan_origin = None
+        self.move_origin = None
+        self.move_size = None
+        self.snap_others = []
+        self.snap_x = None
+        self.snap_y = None
+        self.snap_cooldown_x = None
+        self.snap_cooldown_y = None
+        self.area.set_cursor_from_name("default" if interactive else None)
+        if self.get_realized():
+            self._update_input_region()
+        self.area.queue_draw()
+
+    def _update_input_region(self) -> None:
+        region = None if self.interactive else cairo.Region([])
+        self.get_surface().set_input_region(region)
+
+    def _install_input_controllers(self) -> None:
+        click = Gtk.GestureClick.new()
+        click.set_button(0)
+        click.connect("pressed", self._on_button_pressed)
+        click.connect("released", self._on_button_released)
+        self.area.add_controller(click)
+
+        pan = Gtk.GestureDrag.new()
+        pan.set_button(Gdk.BUTTON_PRIMARY)
+        pan.connect("drag-begin", self._on_pan_begin)
+        pan.connect("drag-update", self._on_pan_update)
+        pan.connect("drag-end", self._on_pan_end)
+        self.area.add_controller(pan)
+
+        move = Gtk.GestureDrag.new()
+        move.set_button(Gdk.BUTTON_SECONDARY)
+        move.connect("drag-begin", self._on_move_begin)
+        move.connect("drag-update", self._on_move_update)
+        move.connect("drag-end", self._on_move_end)
+        self.area.add_controller(move)
+
+        scroll = Gtk.EventControllerScroll.new(
+            Gtk.EventControllerScrollFlags.BOTH_AXES
+        )
+        scroll.connect("scroll", self._on_scroll)
+        self.area.add_controller(scroll)
+
+    def _window_at(self, x: float, y: float) -> dict[str, Any] | None:
+        for window, draw_x, draw_y, draw_width, draw_height in self.window_rects:
+            if draw_x <= x <= draw_x + draw_width and draw_y <= y <= draw_y + draw_height:
+                return window
+        return None
+
+    def _on_button_pressed(
+        self, gesture: Gtk.GestureClick, _count: int, x: float, y: float
+    ) -> None:
+        if not self.interactive:
+            return
+        window = self._window_at(x, y)
+        window_id = int(window["id"]) if window is not None else None
+        if gesture.get_current_button() == Gdk.BUTTON_PRIMARY:
+            self.left_press = (x, y, window_id)
+        elif gesture.get_current_button() == Gdk.BUTTON_MIDDLE:
+            self.middle_press = (x, y, window_id)
+
+    def _on_button_released(
+        self, gesture: Gtk.GestureClick, _count: int, x: float, y: float
+    ) -> None:
+        if not self.interactive:
+            return
+        button = gesture.get_current_button()
+        window = self._window_at(x, y)
+        if window is None:
+            self.left_press = None
+            self.middle_press = None
+            return
+        window_id = int(window["id"])
+        if button == Gdk.BUTTON_PRIMARY and self.left_press is not None:
+            start_x, start_y, pressed_id = self.left_press
+            if (
+                pressed_id == window_id
+                and math.hypot(x - start_x, y - start_y) < 5
+            ):
+                self.command_connection.send(
+                    {"Focus": window_id},
+                    {"Action": "center-window"},
+                )
+        elif button == Gdk.BUTTON_MIDDLE and self.middle_press is not None:
+            start_x, start_y, pressed_id = self.middle_press
+            if (
+                pressed_id == window_id
+                and math.hypot(x - start_x, y - start_y) < 5
+            ):
+                self.command_connection.send({"Close": window_id})
+        self.left_press = None
+        self.middle_press = None
+
+    def _ensure_view_camera(self) -> tuple[float, float]:
+        if self.view_camera is not None:
+            return self.view_camera
+        output = (
+            output_for_monitor(self.state, self.monitor_name)
+            if self.state is not None
+            else None
+        )
+        camera = output.get("camera", (0.0, 0.0)) if output is not None else (0.0, 0.0)
+        self.view_camera = (float(camera[0]), float(camera[1]))
+        return self.view_camera
+
+    def _on_pan_begin(self, _gesture: Gtk.GestureDrag, x: float, y: float) -> None:
+        if not self.interactive or self._window_at(x, y) is not None:
+            self.pan_origin = None
+            return
+        self.pan_origin = self._ensure_view_camera()
+        self.area.set_cursor_from_name("grabbing")
+
+    def _on_pan_update(
+        self, _gesture: Gtk.GestureDrag, offset_x: float, offset_y: float
+    ) -> None:
+        if self.pan_origin is None:
+            return
+        scale = max(self.last_canvas_scale, 1e-9)
+        self.view_camera = (
+            self.pan_origin[0] - offset_x / scale,
+            self.pan_origin[1] + offset_y / scale,
+        )
+        self.area.queue_draw()
+
+    def _on_pan_end(
+        self, _gesture: Gtk.GestureDrag, _offset_x: float, _offset_y: float
+    ) -> None:
+        self.pan_origin = None
+        if self.interactive:
+            self.area.set_cursor_from_name("default")
+
+    def _on_move_begin(self, _gesture: Gtk.GestureDrag, x: float, y: float) -> None:
+        if not self.interactive:
+            return
+        window = self._window_at(x, y)
+        if window is None:
+            self.move_origin = None
+            return
+        position_x, position_y = window["position"]
+        self.move_origin = (int(window["id"]), float(position_x), float(position_y))
+        width, height = window["size"]
+        self.move_size = (float(width), float(height))
+        self.snap_others = []
+        for other in self.state.get("windows", []) if self.state is not None else []:
+            if other.get("id") == window["id"] or other.get("is_widget"):
+                continue
+            other_x, other_y = other["position"]
+            other_width, other_height = other["size"]
+            self.snap_others.append(
+                (
+                    other_x - other_width / 2,
+                    other_x + other_width / 2,
+                    other_y - other_height / 2,
+                    other_y + other_height / 2,
+                )
+            )
+        self.snap_x = None
+        self.snap_y = None
+        self.snap_cooldown_x = None
+        self.snap_cooldown_y = None
+        self.area.set_cursor_from_name("grabbing")
+
+    def _on_move_update(
+        self, _gesture: Gtk.GestureDrag, offset_x: float, offset_y: float
+    ) -> None:
+        if self.move_origin is None:
+            return
+        window_id, origin_x, origin_y = self.move_origin
+        scale = max(self.last_canvas_scale, 1e-9)
+        target = [
+            origin_x + offset_x / scale,
+            origin_y - offset_y / scale,
+        ]
+        target = self._snap_move(target)
+        target = [round(target[0]), round(target[1])]
+        self.command_connection.send({"Move": {"window": window_id, "to": target}})
+
+    def _snap_move(self, target: list[float]) -> list[float]:
+        if (
+            not self.snap_config.enabled
+            or self.snap_config.distance <= 0
+            or self.move_size is None
+            or not self.snap_others
+        ):
+            return target
+
+        width, height = self.move_size
+        natural_x = target[0] - width / 2
+        natural_y = target[1] - height / 2
+        # Keep minimap snapping deliberately subtle: its activation band is
+        # always two minimap pixels. Preserve the compositor config's
+        # break-force/distance ratio so the held snap does not feel sticky.
+        map_scale = max(self.last_canvas_scale, 1e-9)
+        threshold = self.minimap_snap_distance / map_scale
+        break_pixels = (
+            self.minimap_snap_distance
+            * self.snap_config.break_force
+            / self.snap_config.distance
+        )
+        break_force = break_pixels / map_scale
+
+        perp_y = self.snap_y.snapped_pos if self.snap_y is not None else natural_y
+        candidate_x = find_snap_candidate(
+            natural_x,
+            width,
+            perp_y,
+            perp_y + height,
+            True,
+            self.snap_others,
+            self.snap_config,
+            threshold,
+        )
+        final_x, self.snap_x, self.snap_cooldown_x = update_axis_snap(
+            self.snap_x,
+            self.snap_cooldown_x,
+            natural_x,
+            candidate_x,
+            threshold,
+            break_force,
+        )
+
+        perp_x = self.snap_x.snapped_pos if self.snap_x is not None else natural_x
+        candidate_y = find_snap_candidate(
+            natural_y,
+            height,
+            perp_x,
+            perp_x + width,
+            False,
+            self.snap_others,
+            self.snap_config,
+            threshold,
+        )
+        final_y, self.snap_y, self.snap_cooldown_y = update_axis_snap(
+            self.snap_y,
+            self.snap_cooldown_y,
+            natural_y,
+            candidate_y,
+            threshold,
+            break_force,
+        )
+        return [final_x + width / 2, final_y + height / 2]
+
+    def _on_move_end(
+        self, _gesture: Gtk.GestureDrag, _offset_x: float, _offset_y: float
+    ) -> None:
+        self.move_origin = None
+        self.move_size = None
+        self.snap_others = []
+        self.snap_x = None
+        self.snap_y = None
+        self.snap_cooldown_x = None
+        self.snap_cooldown_y = None
+        if self.interactive:
+            self.area.set_cursor_from_name("default")
+
+    def _on_scroll(
+        self, controller: Gtk.EventControllerScroll, dx: float, dy: float
+    ) -> bool:
+        if not self.interactive:
+            return False
+        event = controller.get_current_event()
+        device = event.get_device() if event is not None else None
+        source = device.get_source() if device is not None else Gdk.InputSource.MOUSE
+        position = event.get_position() if event is not None else (False, 0.0, 0.0)
+        _, pointer_x, pointer_y = position
+
+        if source == Gdk.InputSource.TOUCHPAD:
+            if self._window_at(pointer_x, pointer_y) is not None:
+                return True
+            camera_x, camera_y = self._ensure_view_camera()
+            scale = max(self.last_canvas_scale, 1e-9)
+            self.view_camera = (
+                camera_x + dx * 24 / scale,
+                camera_y - dy * 24 / scale,
+            )
+        else:
+            if abs(dy) < 1e-9:
+                return True
+            # Backends disagree on wheel units: one notch may arrive as 1, 15,
+            # or 120. Use its direction only, otherwise a single event can
+            # throw the map straight to an extreme zoom.
+            zoom_step = 1.15 if dy < 0 else 1 / 1.15
+            old_target = self.target_view_zoom
+            self.target_view_zoom = max(
+                0.25, min(4.0, old_target * zoom_step)
+            )
+            if self.target_view_zoom == old_target:
+                return True
+            if self.zoom_tick_id is None:
+                self.zoom_frame_time = None
+                self.zoom_tick_id = self.area.add_tick_callback(self._on_zoom_tick)
+        self.area.queue_draw()
+        return True
+
+    def _on_zoom_tick(
+        self, _area: Gtk.DrawingArea, frame_clock: Gdk.FrameClock
+    ) -> bool:
+        now = frame_clock.get_frame_time()
+        if self.zoom_frame_time is None:
+            dt = 1 / 60
+        else:
+            dt = min((now - self.zoom_frame_time) / 1_000_000, 0.1)
+        self.zoom_frame_time = now
+
+        remaining = self.target_view_zoom - self.view_zoom
+        if abs(remaining) < 0.001:
+            self.view_zoom = self.target_view_zoom
+            self.zoom_tick_id = None
+            self.zoom_frame_time = None
+            self.area.queue_draw()
+            return False
+
+        # Same frame-rate-independent lerp and default speed as driftwm's
+        # camera/zoom animation: 0.3 of the remainder at 60 FPS.
+        factor = 1.0 - (1.0 - 0.3) ** (dt * 60)
+        self.view_zoom += remaining * factor
+        self.area.queue_draw()
+        return True
 
     def update_state(self, state: dict[str, Any]) -> None:
         self.state = state
@@ -483,21 +1081,36 @@ class MinimapWindow(Gtk.ApplicationWindow):
         context.restore()
 
         center_x, center_y = width / 2, height / 2
-        camera_x, camera_y = output["camera"]
+        output_camera_x, output_camera_y = output["camera"]
+        if self.interactive:
+            camera_x, camera_y = self._ensure_view_camera()
+        else:
+            camera_x, camera_y = output_camera_x, output_camera_y
         output_width, output_height = output["size"]
         viewport_zoom = max(float(output.get("zoom", 1.0)), 1e-6)
         fit_scale = min(width / output_width, height / output_height)
-        canvas_scale = viewport_zoom * fit_scale * self.config.zoom
+        canvas_scale = viewport_zoom * fit_scale * self.config.zoom * self.view_zoom
+        self.last_canvas_scale = canvas_scale
+        self.window_rects = []
 
         context.set_source_rgba(
             *self.config.canvas_color, self.config.canvas_opacity
         )
-        rounded_rectangle(
-            context, 0.5, 0.5, width - 1, height - 1, self.config.canvas_radius
-        )
+        if self.config.canvas_radius == 0:
+            context.rectangle(0, 0, width, height)
+        else:
+            rounded_rectangle(
+                context,
+                0.5,
+                0.5,
+                width - 1,
+                height - 1,
+                self.config.canvas_radius,
+            )
         context.fill()
 
-        for window in reversed(self.state.get("windows", [])):
+        drawn_windows = list(reversed(self.state.get("windows", [])))
+        for window in drawn_windows:
             x, y = window["position"]
             window_width, window_height = window["size"]
             draw_x = center_x + (x - camera_x - window_width / 2) * canvas_scale
@@ -521,6 +1134,9 @@ class MinimapWindow(Gtk.ApplicationWindow):
                 self.config.window_radius,
             )
             context.fill()
+            self.window_rects.insert(
+                0, (window, draw_x, draw_y, draw_width, draw_height)
+            )
 
         context.set_source_rgba(
             *self.config.frame_color, self.config.frame_opacity
@@ -570,27 +1186,36 @@ class MinimapApplication(Gtk.Application):
         self.subscription = StateSubscription(self.update_state)
         self.control_server = ControlServer(self._handle_command)
         self.maps_visible = False
-        self.large_profile = False
+        self.profile = "normal"
+        self.profile_scale = 1.0
+        self.profile_opacity = 1.0
 
-    def _profile_config(self, large: bool) -> argparse.Namespace:
+    def _profile_config(self) -> argparse.Namespace:
         values = vars(self.base_config).copy()
-        if large:
-            values["width"] *= 2
-            values["height"] *= 2
-            values["canvas_opacity"] = 0.8
-            values["window_opacity"] = 0.8
-            values["frame_opacity"] = 0.8
+        if self.profile == "large":
+            values["width"] = max(1, round(values["width"] * self.profile_scale))
+            values["height"] = max(1, round(values["height"] * self.profile_scale))
+        if self.profile != "normal":
+            values["canvas_opacity"] = self.profile_opacity
+            values["window_opacity"] = self.profile_opacity
+            values["frame_opacity"] = self.profile_opacity
+        if self.profile == "fullscreen":
+            values["canvas_radius"] = 0
         return argparse.Namespace(**values)
 
     def _apply_profile(self) -> None:
-        self.config = self._profile_config(self.large_profile)
+        self.config = self._profile_config()
         for window in self.windows:
-            window.apply_config(self.config)
+            window.apply_config(
+                self.config, fullscreen=self.profile == "fullscreen"
+            )
+            window.set_interactive(self.profile != "normal")
 
     def _update_window_visibility(self) -> None:
         for window in self.windows:
             fullscreen_hidden = (
-                not self.config.show_fullscreen
+                self.profile != "fullscreen"
+                and not self.config.show_fullscreen
                 and monitor_is_fullscreen(self.state, window.monitor_name)
             )
             window.set_visible(self.maps_visible and not fullscreen_hidden)
@@ -599,8 +1224,21 @@ class MinimapApplication(Gtk.Application):
         if command == "show":
             self.maps_visible = not self.maps_visible
             self._update_window_visibility()
-        elif command == "toggle":
-            self.large_profile = not self.large_profile
+        elif command.startswith("toggle:"):
+            _, scale, alpha = command.split(":")
+            if self.profile == "large":
+                self.profile = "normal"
+            else:
+                self.profile = "large"
+                self.profile_scale = float(scale)
+                self.profile_opacity = float(alpha)
+            self._apply_profile()
+        elif command.startswith("toggle-fullscreen:"):
+            if self.profile == "fullscreen":
+                self.profile = "normal"
+            else:
+                self.profile = "fullscreen"
+                self.profile_opacity = float(command.partition(":")[2])
             self._apply_profile()
 
     def do_activate(self) -> None:
@@ -628,13 +1266,26 @@ class MinimapApplication(Gtk.Application):
         self.activate()
 
         if first_run:
-            if requested.toggle:
-                self.large_profile = True
+            if requested.toggle is not None:
+                scale, alpha = requested.toggle
+                self.profile = "large"
+                self.profile_scale = scale
+                self.profile_opacity = alpha
                 self._apply_profile()
-        elif requested.show:
-            self._handle_command("show")
-        elif requested.toggle:
-            self._handle_command("toggle")
+            elif requested.toggle_fullscreen is not None:
+                self.profile = "fullscreen"
+                self.profile_opacity = requested.toggle_fullscreen
+                self._apply_profile()
+        else:
+            if requested.show:
+                self._handle_command("show")
+            elif requested.toggle is not None:
+                scale, alpha = requested.toggle
+                self._handle_command(f"toggle:{scale}:{alpha}")
+            elif requested.toggle_fullscreen is not None:
+                self._handle_command(
+                    f"toggle-fullscreen:{requested.toggle_fullscreen}"
+                )
         return 0
 
     def update_state(self, state: dict[str, Any]) -> None:
@@ -646,6 +1297,8 @@ class MinimapApplication(Gtk.Application):
     def do_shutdown(self) -> None:
         self.control_server.stop()
         self.subscription.stop()
+        for window in self.windows:
+            window.command_connection.close()
         self.release()
         Gtk.Application.do_shutdown(self)
 
