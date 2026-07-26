@@ -137,8 +137,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--canvas-opacity", "--bg-opacity", dest="canvas_opacity",
-        type=opacity, default=0.35, metavar="F",
-        help="canvas background opacity 0-1 (default: 0.35)",
+        type=opacity, default=0.45, metavar="F",
+        help="canvas background opacity 0-1 (default: 0.45)",
     )
     parser.add_argument(
         "--window-color", type=parse_hex_color, default=(0.72, 0.75, 0.82),
