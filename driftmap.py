@@ -254,6 +254,34 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="current viewport outline width (default: 1)",
     )
     parser.add_argument(
+        "--bookmarks-color", type=parse_hex_color, default=(1.0, 0.54, 0.4),
+        metavar="HEX", help="bookmark point color (default: #ff8a66)",
+    )
+    parser.add_argument(
+        "--home-color", type=parse_hex_color, default=(0.4, 0.88, 0.64),
+        metavar="HEX", help="home point color (default: #66e0a3)",
+    )
+    parser.add_argument(
+        "--bookmarks-opacity", type=opacity, default=1.0, metavar="F",
+        help="bookmark point opacity 0-1 (default: 1)",
+    )
+    parser.add_argument(
+        "--home-opacity", type=opacity, default=1.0, metavar="F",
+        help="home point opacity 0-1 (default: 1)",
+    )
+    parser.add_argument(
+        "--bookmark-size", type=nonnegative_int, default=5, metavar="PX",
+        help="bookmark point diameter; 0 disables bookmarks (default: 5)",
+    )
+    parser.add_argument(
+        "--home-size", type=nonnegative_int, default=5, metavar="PX",
+        help="home point diameter; 0 disables home (default: 5)",
+    )
+    parser.add_argument(
+        "--dot-hitbox", type=nonnegative_int, default=10, metavar="PX",
+        help="extra point hitbox radius in pixels (default: 10)",
+    )
+    parser.add_argument(
         "--canvas-radius", "--radius", dest="canvas_radius",
         type=nonnegative_int, default=12, metavar="PX",
         help="canvas corner radius; 0 disables rounding (default: 12)",
@@ -335,6 +363,16 @@ class SnapConfig:
 class AxisSnap:
     snapped_pos: float
     natural_at_engage: float
+
+
+@dataclass(frozen=True)
+class Marker:
+    action: str
+    x: float
+    y: float
+    diameter: int
+    color: tuple[float, float, float]
+    opacity: float
 
 
 def load_snap_config() -> SnapConfig:
@@ -456,19 +494,27 @@ def update_axis_snap(
 
 
 class StateSubscription:
-    def __init__(self, on_state) -> None:
+    def __init__(self, on_state, on_bookmarks) -> None:
         self.on_state = on_state
+        self.on_bookmarks = on_bookmarks
         self.connection: socket.socket | None = None
         self.source_id: int | None = None
         self.buffer = bytearray()
         self.retry_id: int | None = None
+        self.bookmark_poll_id: int | None = None
 
     def start(self) -> None:
         self._connect()
+        self.bookmark_poll_id = GLib.timeout_add_seconds(
+            1, self._request_bookmarks
+        )
 
     def stop(self) -> None:
         if self.retry_id is not None:
             GLib.source_remove(self.retry_id)
+        if self.bookmark_poll_id is not None:
+            GLib.source_remove(self.bookmark_poll_id)
+            self.bookmark_poll_id = None
         self._disconnect()
 
     def _connect(self) -> bool:
@@ -476,7 +522,7 @@ class StateSubscription:
         try:
             connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             connection.connect(str(ipc_socket_path()))
-            connection.sendall(b'"Subscribe"\n')
+            connection.sendall(b'"Subscribe"\n{"Bookmark":{}}\n')
             connection.setblocking(False)
         except (OSError, RuntimeError) as error:
             print(f"driftwm-minimap: {error}; retrying", file=sys.stderr)
@@ -493,6 +539,14 @@ class StateSubscription:
             self._on_io,
         )
         return False
+
+    def _request_bookmarks(self) -> bool:
+        if self.connection is not None:
+            try:
+                self.connection.sendall(b'{"Bookmark":{}}\n')
+            except (BlockingIOError, OSError):
+                self._retry()
+        return True
 
     def _disconnect(self) -> None:
         if self.source_id is not None:
@@ -538,6 +592,13 @@ class StateSubscription:
                 continue
             if isinstance(message, dict) and isinstance(message.get("State"), dict):
                 self.on_state(message["State"])
+            bookmarks = (
+                message.get("Ok", {}).get("Bookmarks")
+                if isinstance(message, dict) and isinstance(message.get("Ok"), dict)
+                else None
+            )
+            if isinstance(bookmarks, dict):
+                self.on_bookmarks(bookmarks)
         return True
 
 
@@ -655,8 +716,12 @@ class MinimapWindow(Gtk.ApplicationWindow):
         self.zoom_tick_id: int | None = None
         self.zoom_frame_time: int | None = None
         self.window_rects: list[tuple[dict[str, Any], float, float, float, float]] = []
+        self.bookmarks: dict[str, list[float]] = {}
+        self.marker_hits: list[tuple[str, float, float, float]] = []
+        self.hovered_marker: str | None = None
         self.last_canvas_scale = 1.0
         self.left_press: tuple[float, float, int | None] | None = None
+        self.marker_press: str | None = None
         self.middle_press: tuple[float, float, int | None] | None = None
         self.pan_origin: tuple[float, float] | None = None
         self.move_origin: tuple[int, float, float] | None = None
@@ -741,6 +806,8 @@ class MinimapWindow(Gtk.ApplicationWindow):
             self.zoom_tick_id = None
         self.zoom_frame_time = None
         self.left_press = None
+        self.marker_press = None
+        self.hovered_marker = None
         self.middle_press = None
         self.pan_origin = None
         self.move_origin = None
@@ -786,16 +853,47 @@ class MinimapWindow(Gtk.ApplicationWindow):
         scroll.connect("scroll", self._on_scroll)
         self.area.add_controller(scroll)
 
+        motion = Gtk.EventControllerMotion.new()
+        motion.connect("motion", self._on_pointer_motion)
+        motion.connect("leave", self._on_pointer_leave)
+        self.area.add_controller(motion)
+
     def _window_at(self, x: float, y: float) -> dict[str, Any] | None:
         for window, draw_x, draw_y, draw_width, draw_height in self.window_rects:
             if draw_x <= x <= draw_x + draw_width and draw_y <= y <= draw_y + draw_height:
                 return window
         return None
 
+    def _marker_at(self, x: float, y: float) -> str | None:
+        for action, center_x, center_y, hit_radius in reversed(self.marker_hits):
+            if math.hypot(x - center_x, y - center_y) <= hit_radius:
+                return action
+        return None
+
+    def _on_pointer_motion(
+        self, _controller: Gtk.EventControllerMotion, x: float, y: float
+    ) -> None:
+        marker = self._marker_at(x, y) if self.interactive else None
+        if marker != self.hovered_marker:
+            self.hovered_marker = marker
+            self.area.queue_draw()
+
+    def _on_pointer_leave(
+        self, _controller: Gtk.EventControllerMotion
+    ) -> None:
+        if self.hovered_marker is not None:
+            self.hovered_marker = None
+            self.area.queue_draw()
+
     def _on_button_pressed(
         self, gesture: Gtk.GestureClick, _count: int, x: float, y: float
     ) -> None:
         if not self.interactive:
+            return
+        marker = self._marker_at(x, y)
+        if gesture.get_current_button() == Gdk.BUTTON_PRIMARY and marker is not None:
+            self.marker_press = marker
+            self.left_press = None
             return
         window = self._window_at(x, y)
         window_id = int(window["id"]) if window is not None else None
@@ -810,6 +908,14 @@ class MinimapWindow(Gtk.ApplicationWindow):
         if not self.interactive:
             return
         button = gesture.get_current_button()
+        marker = self._marker_at(x, y)
+        if button == Gdk.BUTTON_PRIMARY and self.marker_press is not None:
+            if marker == self.marker_press:
+                self.command_connection.send({"Action": marker})
+            self.marker_press = None
+            self.left_press = None
+            self.middle_press = None
+            return
         window = self._window_at(x, y)
         if window is None:
             self.left_press = None
@@ -834,6 +940,7 @@ class MinimapWindow(Gtk.ApplicationWindow):
             ):
                 self.command_connection.send({"Close": window_id})
         self.left_press = None
+        self.marker_press = None
         self.middle_press = None
 
     def _ensure_view_camera(self) -> tuple[float, float]:
@@ -849,7 +956,11 @@ class MinimapWindow(Gtk.ApplicationWindow):
         return self.view_camera
 
     def _on_pan_begin(self, _gesture: Gtk.GestureDrag, x: float, y: float) -> None:
-        if not self.interactive or self._window_at(x, y) is not None:
+        if (
+            not self.interactive
+            or self._marker_at(x, y) is not None
+            or self._window_at(x, y) is not None
+        ):
             self.pan_origin = None
             return
         self.pan_origin = self._ensure_view_camera()
@@ -1066,6 +1177,19 @@ class MinimapWindow(Gtk.ApplicationWindow):
         self.state = state
         self.area.queue_draw()
 
+    def update_bookmarks(self, bookmarks: dict[str, Any]) -> None:
+        self.bookmarks = {
+            str(name): [float(point[0]), float(point[1])]
+            for name, point in bookmarks.items()
+            if (
+                isinstance(point, list)
+                and len(point) == 2
+                and all(isinstance(value, (int, float)) for value in point)
+                and all(math.isfinite(float(value)) for value in point)
+            )
+        }
+        self.area.queue_draw()
+
     def _draw(
         self, _area: Gtk.DrawingArea, context: cairo.Context, width: int, height: int
     ) -> None:
@@ -1092,6 +1216,7 @@ class MinimapWindow(Gtk.ApplicationWindow):
         canvas_scale = viewport_zoom * fit_scale * self.config.zoom * self.view_zoom
         self.last_canvas_scale = canvas_scale
         self.window_rects = []
+        self.marker_hits = []
 
         context.set_source_rgba(
             *self.config.canvas_color, self.config.canvas_opacity
@@ -1160,6 +1285,48 @@ class MinimapWindow(Gtk.ApplicationWindow):
             )
             context.stroke()
 
+        markers: list[Marker] = []
+        if self.config.bookmark_size > 0:
+            markers.extend(
+                Marker(
+                    action=f"go-to-bookmark {name}",
+                    x=point[0],
+                    y=point[1],
+                    diameter=self.config.bookmark_size,
+                    color=self.config.bookmarks_color,
+                    opacity=self.config.bookmarks_opacity,
+                )
+                for name, point in self.bookmarks.items()
+            )
+        if self.config.home_size > 0:
+            markers.append(
+                Marker(
+                    action="home-toggle",
+                    x=0.0,
+                    y=0.0,
+                    diameter=self.config.home_size,
+                    color=self.config.home_color,
+                    opacity=self.config.home_opacity,
+                )
+            )
+        for marker in markers:
+            marker_x = center_x + (marker.x - camera_x) * canvas_scale
+            marker_y = center_y - (marker.y - camera_y) * canvas_scale
+            radius = marker.diameter / 2
+            hit_radius = radius + self.config.dot_hitbox
+            if marker.action == self.hovered_marker:
+                context.set_source_rgba(
+                    *marker.color, self.config.canvas_opacity
+                )
+                context.arc(marker_x, marker_y, hit_radius, 0, math.tau)
+                context.fill()
+            context.set_source_rgba(*marker.color, marker.opacity)
+            context.arc(marker_x, marker_y, radius, 0, math.tau)
+            context.fill()
+            self.marker_hits.append(
+                (marker.action, marker_x, marker_y, hit_radius)
+            )
+
 
 def rounded_rectangle(
     context: cairo.Context, x: float, y: float, width: float, height: float, radius: float
@@ -1183,7 +1350,10 @@ class MinimapApplication(Gtk.Application):
         self.config = config
         self.windows: list[MinimapWindow] = []
         self.state: dict[str, Any] | None = None
-        self.subscription = StateSubscription(self.update_state)
+        self.bookmarks: dict[str, Any] = {}
+        self.subscription = StateSubscription(
+            self.update_state, self.update_bookmarks
+        )
         self.control_server = ControlServer(self._handle_command)
         self.maps_visible = False
         self.profile = "normal"
@@ -1250,6 +1420,7 @@ class MinimapApplication(Gtk.Application):
                 window = MinimapWindow(self, self.config, monitor)
                 if self.state is not None:
                     window.update_state(self.state)
+                window.update_bookmarks(self.bookmarks)
                 self.windows.append(window)
             self.maps_visible = True
             self._update_window_visibility()
@@ -1293,6 +1464,11 @@ class MinimapApplication(Gtk.Application):
         for window in self.windows:
             window.update_state(state)
         self._update_window_visibility()
+
+    def update_bookmarks(self, bookmarks: dict[str, Any]) -> None:
+        self.bookmarks = bookmarks
+        for window in self.windows:
+            window.update_bookmarks(bookmarks)
 
     def do_shutdown(self) -> None:
         self.control_server.stop()
