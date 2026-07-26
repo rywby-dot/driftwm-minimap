@@ -16,6 +16,34 @@ from typing import Any
 LAYER_SHELL_LIBRARY = "libgtk4-layer-shell.so"
 
 
+def control_socket_path() -> Path:
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR", "/tmp")
+    display = os.environ.get("WAYLAND_DISPLAY", "wayland")
+    return Path(runtime_dir) / "driftwm" / f"driftmap-control-{display}.sock"
+
+
+def send_fast_control_command() -> None:
+    """Contact the running instance without paying GTK's startup cost."""
+    arguments = sys.argv[1:]
+    if arguments not in (["--show"], ["--toggle"]):
+        return
+    if not os.environ.get("WAYLAND_DISPLAY"):
+        return
+
+    connection = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    try:
+        connection.sendto(
+            arguments[0].removeprefix("--").encode(),
+            str(control_socket_path()),
+        )
+    except OSError:
+        # No running instance: continue with the normal application startup.
+        return
+    finally:
+        connection.close()
+    raise SystemExit(0)
+
+
 def preload_layer_shell() -> None:
     if LAYER_SHELL_LIBRARY in os.environ.get("LD_PRELOAD", ""):
         return
@@ -38,6 +66,7 @@ def preload_layer_shell() -> None:
     os.execve(sys.executable, [sys.executable, *sys.argv], environment)
 
 
+send_fast_control_command()
 preload_layer_shell()
 
 import cairo  # noqa: E402
@@ -47,7 +76,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
 gi.require_version("Gtk4LayerShell", "1.0")
 
-from gi.repository import Gdk, GLib, Gtk, Gtk4LayerShell  # noqa: E402
+from gi.repository import Gdk, Gio, GLib, Gtk, Gtk4LayerShell  # noqa: E402
 
 Gtk.Window.set_auto_startup_notification(False)
 
@@ -103,8 +132,19 @@ def nonnegative_int(value: str) -> int:
     return number
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="driftwm canvas minimap overlay")
+    command = parser.add_mutually_exclusive_group()
+    command.add_argument(
+        "--show",
+        action="store_true",
+        help="show or hide the running map",
+    )
+    command.add_argument(
+        "--toggle",
+        action="store_true",
+        help="toggle between the normal and large 0.8-opacity profiles",
+    )
     parser.add_argument(
         "--width", type=positive_int, default=320, metavar="PX",
         help="map width (default: 320)",
@@ -186,7 +226,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="keep the map visible on outputs with a fullscreen window",
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def ipc_socket_path() -> Path:
@@ -319,6 +359,58 @@ class StateSubscription:
         return True
 
 
+class ControlServer:
+    def __init__(self, on_command) -> None:
+        self.on_command = on_command
+        self.connection: socket.socket | None = None
+        self.source_id: int | None = None
+        self.owns_socket = False
+
+    def start(self) -> None:
+        path = control_socket_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+
+        self.connection = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        self.connection.bind(str(path))
+        self.owns_socket = True
+        self.connection.setblocking(False)
+        self.source_id = GLib.io_add_watch(
+            self.connection.fileno(),
+            GLib.IO_IN | GLib.IO_HUP | GLib.IO_ERR,
+            self._on_io,
+        )
+
+    def stop(self) -> None:
+        if self.source_id is not None:
+            GLib.source_remove(self.source_id)
+            self.source_id = None
+        if self.connection is not None:
+            self.connection.close()
+            self.connection = None
+        if self.owns_socket:
+            try:
+                control_socket_path().unlink()
+            except FileNotFoundError:
+                pass
+            self.owns_socket = False
+
+    def _on_io(self, _fd: int, condition: GLib.IOCondition) -> bool:
+        if condition & (GLib.IO_HUP | GLib.IO_ERR):
+            return True
+        assert self.connection is not None
+        try:
+            command = self.connection.recv(64).decode()
+        except (BlockingIOError, UnicodeDecodeError):
+            return True
+        if command in {"show", "toggle"}:
+            self.on_command(command)
+        return True
+
+
 class MinimapWindow(Gtk.ApplicationWindow):
     def __init__(
         self,
@@ -359,6 +451,14 @@ class MinimapWindow(Gtk.ApplicationWindow):
             self.get_display(), css, Gtk.STYLE_PROVIDER_PRIORITY_USER
         )
         self.connect("realize", self._make_click_through)
+
+    def apply_config(self, config: argparse.Namespace) -> None:
+        self.config = config
+        self.area.set_content_width(config.width)
+        self.area.set_content_height(config.height)
+        self.set_default_size(config.width, config.height)
+        self.area.queue_resize()
+        self.area.queue_draw()
 
     @staticmethod
     def _make_click_through(window: Gtk.Window) -> None:
@@ -459,12 +559,33 @@ def rounded_rectangle(
 
 class MinimapApplication(Gtk.Application):
     def __init__(self, config: argparse.Namespace) -> None:
-        super().__init__(application_id="dev.driftwm.Minimap")
+        super().__init__(
+            application_id="dev.driftwm.Minimap",
+            flags=Gio.ApplicationFlags.HANDLES_COMMAND_LINE,
+        )
+        self.base_config = config
         self.config = config
         self.windows: list[MinimapWindow] = []
         self.state: dict[str, Any] | None = None
         self.subscription = StateSubscription(self.update_state)
+        self.control_server = ControlServer(self._handle_command)
         self.maps_visible = False
+        self.large_profile = False
+
+    def _profile_config(self, large: bool) -> argparse.Namespace:
+        values = vars(self.base_config).copy()
+        if large:
+            values["width"] *= 2
+            values["height"] *= 2
+            values["canvas_opacity"] = 0.8
+            values["window_opacity"] = 0.8
+            values["frame_opacity"] = 0.8
+        return argparse.Namespace(**values)
+
+    def _apply_profile(self) -> None:
+        self.config = self._profile_config(self.large_profile)
+        for window in self.windows:
+            window.apply_config(self.config)
 
     def _update_window_visibility(self) -> None:
         for window in self.windows:
@@ -474,8 +595,17 @@ class MinimapApplication(Gtk.Application):
             )
             window.set_visible(self.maps_visible and not fullscreen_hidden)
 
+    def _handle_command(self, command: str) -> None:
+        if command == "show":
+            self.maps_visible = not self.maps_visible
+            self._update_window_visibility()
+        elif command == "toggle":
+            self.large_profile = not self.large_profile
+            self._apply_profile()
+
     def do_activate(self) -> None:
         if not self.windows:
+            self.control_server.start()
             monitors = Gdk.Display.get_default().get_monitors()
             for index in range(monitors.get_n_items()):
                 monitor = monitors.get_item(index)
@@ -487,10 +617,25 @@ class MinimapApplication(Gtk.Application):
             self._update_window_visibility()
             self.subscription.start()
             self.hold()
-            return
 
-        self.maps_visible = not self.maps_visible
-        self._update_window_visibility()
+    def do_command_line(self, command_line: Gio.ApplicationCommandLine) -> int:
+        arguments = [
+            argument.decode() if isinstance(argument, bytes) else argument
+            for argument in command_line.get_arguments()
+        ]
+        requested = parse_args(arguments[1:])
+        first_run = not self.windows
+        self.activate()
+
+        if first_run:
+            if requested.toggle:
+                self.large_profile = True
+                self._apply_profile()
+        elif requested.show:
+            self._handle_command("show")
+        elif requested.toggle:
+            self._handle_command("toggle")
+        return 0
 
     def update_state(self, state: dict[str, Any]) -> None:
         self.state = state
@@ -499,6 +644,7 @@ class MinimapApplication(Gtk.Application):
         self._update_window_visibility()
 
     def do_shutdown(self) -> None:
+        self.control_server.stop()
         self.subscription.stop()
         self.release()
         Gtk.Application.do_shutdown(self)
@@ -514,7 +660,7 @@ def main() -> int:
         return 1
     application = MinimapApplication(config)
     try:
-        return application.run([sys.argv[0]])
+        return application.run(sys.argv)
     except KeyboardInterrupt:
         application.quit()
         return 130

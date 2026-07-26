@@ -23,11 +23,16 @@ pipx upgrade driftwm-minimap
 driftmap
 ```
 
-To turn off the minimap, you dont need to kill the process. Just run 
+To show or hide the minimap, you dont need to kill the process. Run
 ```
-driftmap
+driftmap --show
 ```
-one more time.
+
+To switch instantly between the normal profile and a profile with twice the
+width and height and 0.8 opacity, run
+```
+driftmap --toggle
+```
 
 So, you can set it in your driftwm config file
 ```
@@ -38,7 +43,8 @@ autostart = [
 ```
 ```
 [keybindings]
-"mod+u" = "spawn driftmap"   <-- map toggle
+"mod+u" = "spawn driftmap --show"   <-- visibility toggle
+"mod+i" = "spawn driftmap --toggle" <-- size/opacity toggle
 ```
 
 To kill the process run
@@ -55,6 +61,8 @@ to see avalible options:
 ```
 options:
   -h, --help            show this help message and exit
+  --show                show or hide the running map
+  --toggle              toggle between the normal and large 0.8-opacity profiles
   --width PX            map width (default: 320)
   --height PX           map height (default: 180)
   --zoom F              map zoom relative to the current viewport (default: 0.15)
@@ -105,4 +113,3 @@ driftmap \
 ```
 
 https://github.com/user-attachments/assets/01435579-189a-4176-ae45-6ff9a45c2b26
-
