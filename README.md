@@ -67,7 +67,7 @@ Each invocation toggles visibility without terminating the background process.
 driftmap --toggle 2 0.8
 ```
 
-`X` is the width and height multiplier; `Y` is the opacity from `0` to `1`.
+`2` is the width and height multiplier; `0.8` is the opacity from `0` to `1`.
 The example changes a `320×180` map into `640×360` and sets the canvas,
 windows, and viewport frames to `0.8` opacity.
 
@@ -75,6 +75,8 @@ The interactive profile keeps the startup colors, position, zoom, radii, and
 other settings. Calling the same toggle again returns to the compact
 click-through profile. Switching profiles resets the minimap's interactive
 camera, zoom animation, drag state, and snap state.
+
+<img width="960" height="540" alt="image" src="https://github.com/user-attachments/assets/c5f911bd-5121-4341-8ed3-a3150baab07c" />
 
 ### Interactive fullscreen mode
 
@@ -89,6 +91,8 @@ monitor without gaps. Canvas corner rounding is forced off in this mode.
 Calling the command again returns to the compact click-through profile.
 Fullscreen mode remains visible even when Driftwm has a fullscreen client on
 that output.
+
+<img width="960" height="540" alt="image" src="https://github.com/user-attachments/assets/5e285a97-d0c8-4e02-bf1b-e4e3fc348dfd" />
 
 ## Interactive controls
 
@@ -164,7 +168,7 @@ Example autostart and keybindings:
 
 ```toml
 autostart = [
-  "driftmap --snap 8",
+  "driftmap",
 ]
 
 [keybindings]
@@ -250,7 +254,8 @@ driftmap \
   --canvas-radius 12 \
   --window-radius 3 \
   --snap 8 \
-  --show-fullscreen
+# --show-fullscreen \   #<-- show map when fullscreen  
+# --snap-off   #<-- can not be use with --snap <PX>
 ```
 
 Run `driftmap --help` for the generated command-line reference.
@@ -262,5 +267,3 @@ Visibility toggling does not terminate the process. Stop it with:
 ```sh
 pkill -f driftmap
 ```
-
-https://github.com/user-attachments/assets/01435579-189a-4176-ae45-6ff9a45c2b26
