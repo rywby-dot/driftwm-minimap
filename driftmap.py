@@ -18,6 +18,12 @@ from typing import Any
 LAYER_SHELL_LIBRARY = "libgtk4-layer-shell.so"
 
 
+def is_rgba_hex(value: str) -> bool:
+    return len(value) == 8 and all(
+        character in "0123456789abcdefABCDEF" for character in value
+    )
+
+
 def control_socket_path() -> Path:
     runtime_dir = os.environ.get("XDG_RUNTIME_DIR", "/tmp")
     display = os.environ.get("WAYLAND_DISPLAY", "wayland")
@@ -32,18 +38,16 @@ def send_fast_control_command() -> None:
         command = "show"
     elif len(arguments) == 3 and arguments[0] == "--toggle":
         try:
-            scale, alpha = float(arguments[1]), float(arguments[2])
+            scale = float(arguments[1])
         except ValueError:
             return
-        if math.isfinite(scale) and scale > 0 and math.isfinite(alpha) and 0 <= alpha <= 1:
-            command = f"toggle:{scale}:{alpha}"
+        canvas = arguments[2]
+        if math.isfinite(scale) and scale > 0 and is_rgba_hex(canvas):
+            command = f"toggle:{scale}:{canvas}"
     elif len(arguments) == 2 and arguments[0] == "--toggle-fullscreen":
-        try:
-            alpha = float(arguments[1])
-        except ValueError:
-            return
-        if math.isfinite(alpha) and 0 <= alpha <= 1:
-            command = f"toggle-fullscreen:{alpha}"
+        canvas = arguments[1]
+        if is_rgba_hex(canvas):
+            command = f"toggle-fullscreen:{canvas}"
     if command is None:
         return
     if not os.environ.get("WAYLAND_DISPLAY"):
@@ -112,28 +116,32 @@ POSITION_ANCHORS = {
 }
 
 
-def parse_hex_color(value: str) -> tuple[float, float, float]:
-    value = value.lstrip("#")
-    if len(value) != 6:
-        raise argparse.ArgumentTypeError(f"invalid color: #{value}")
-    try:
-        red, green, blue = int(value[:2], 16), int(value[2:4], 16), int(value[4:], 16)
-    except ValueError as error:
-        raise argparse.ArgumentTypeError(f"invalid color: #{value}") from error
-    return red / 255, green / 255, blue / 255
+def parse_rgba(value: str) -> tuple[float, float, float, float]:
+    if not is_rgba_hex(value):
+        raise argparse.ArgumentTypeError(
+            "must be exactly 8 hexadecimal characters (RRGGBBAA)"
+        )
+    return tuple(
+        int(value[index:index + 2], 16) / 255
+        for index in range(0, 8, 2)
+    )
 
 
-def opacity(value: str) -> float:
-    number = float(value)
-    if not 0 <= number <= 1:
-        raise argparse.ArgumentTypeError("must be between 0 and 1")
-    return number
+def format_rgba(color: tuple[float, float, float, float]) -> str:
+    return "".join(f"{round(channel * 255):02x}" for channel in color)
 
 
 def positive_float(value: str) -> float:
     number = float(value)
     if not math.isfinite(number) or number <= 0:
         raise argparse.ArgumentTypeError("must be greater than zero")
+    return number
+
+
+def nonnegative_float(value: str) -> float:
+    number = float(value)
+    if not math.isfinite(number) or number < 0:
+        raise argparse.ArgumentTypeError("must be zero or greater")
     return number
 
 
@@ -162,15 +170,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     command.add_argument(
         "--toggle",
         nargs=2,
-        type=float,
-        metavar=("X", "Y"),
-        help="toggle a profile with size multiplier X and opacity Y",
+        metavar=("SCALE", "RRGGBBAA"),
+        help="toggle a scaled profile with the given canvas RGBA",
     )
     command.add_argument(
         "--toggle-fullscreen",
-        type=opacity,
-        metavar="Y",
-        help="toggle an interactive fullscreen profile with opacity Y",
+        type=parse_rgba,
+        metavar="RRGGBBAA",
+        help="toggle a fullscreen profile with the given canvas RGBA",
     )
     snap = parser.add_mutually_exclusive_group()
     snap.add_argument(
@@ -212,41 +219,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="distance from anchored screen edges (default: 10)",
     )
     parser.add_argument(
-        "--canvas-color", "--bg-color", dest="canvas_color",
-        type=parse_hex_color, default=(0.0176, 0.0176, 0.0176),
-        metavar="HEX", help="background color (default: #242424)",
+        "--canvas", type=parse_rgba, default=parse_rgba("2424244d"),
+        metavar="RRGGBBAA", help="canvas color and opacity (default: 2424244d)",
     )
     parser.add_argument(
-        "--canvas-opacity", "--bg-opacity", dest="canvas_opacity",
-        type=opacity, default=0.3, metavar="F",
-        help="canvas background opacity 0-1 (default: 0.3)",
+        "--window", type=parse_rgba, default=parse_rgba("b8bfd14d"),
+        metavar="RRGGBBAA", help="normal window RGBA (default: b8bfd14d)",
     )
     parser.add_argument(
-        "--window-color", type=parse_hex_color, default=(0.72, 0.75, 0.82),
-        metavar="HEX", help="normal window color (default: #b8bfd1)",
+        "--active-window", type=parse_rgba, default=parse_rgba("59b8ff4d"),
+        metavar="RRGGBBAA", help="focused window RGBA (default: 59b8ff4d)",
     )
     parser.add_argument(
-        "--active-window-color", "--focused-color", dest="active_window_color",
-        type=parse_hex_color, default=(0.35, 0.72, 1.0),
-        metavar="HEX", help="focused window color (default: #59b8ff)",
+        "--suspended", type=parse_rgba, default=parse_rgba("8f94a64d"),
+        metavar="RRGGBBAA", help="suspended window RGBA (default: 8f94a64d)",
     )
     parser.add_argument(
-        "--suspended-color", type=parse_hex_color, default=(0.56, 0.58, 0.65),
-        metavar="HEX", help="suspended window color (default: #8f94a6)",
-    )
-    parser.add_argument(
-        "--window-opacity", type=opacity, default=0.3, metavar="F",
-        help="all window opacity 0-1 (default: 0.3)",
-    )
-    parser.add_argument(
-        "--frame-color", "--viewport-color", dest="frame_color",
-        type=parse_hex_color, default=(0.9216, 0.7682, 0.2159),
-        metavar="HEX", help="current viewport outline color (default: #f6e380)",
-    )
-    parser.add_argument(
-        "--frame-opacity", "--viewport-opacity", dest="frame_opacity",
-        type=opacity, default=0.4, metavar="F",
-        help="current viewport outline opacity 0-1 (default: 0.4)",
+        "--frame", type=parse_rgba, default=parse_rgba("f6e38066"),
+        metavar="RRGGBBAA", help="viewport frame RGBA (default: f6e38066)",
     )
     parser.add_argument(
         "--frame-width", "--viewport-width", dest="frame_width",
@@ -254,32 +244,32 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="current viewport outline width (default: 1)",
     )
     parser.add_argument(
-        "--bookmarks-color", type=parse_hex_color, default=(1.0, 0.54, 0.4),
-        metavar="HEX", help="bookmark point color (default: #ff8a66)",
+        "--bookmarks", type=parse_rgba, default=parse_rgba("ff8a6699"),
+        metavar="RRGGBBAA", help="bookmark point RGBA (default: ff8a6699)",
     )
     parser.add_argument(
-        "--home-color", type=parse_hex_color, default=(0.4, 0.88, 0.64),
-        metavar="HEX", help="home point color (default: #66e0a3)",
+        "--home", type=parse_rgba, default=parse_rgba("66e0a399"),
+        metavar="RRGGBBAA", help="home point RGBA (default: 66e0a399)",
     )
     parser.add_argument(
-        "--bookmarks-opacity", type=opacity, default=1.0, metavar="F",
-        help="bookmark point opacity 0-1 (default: 1)",
+        "--bookmark-hitbox",
+        nargs=2,
+        type=float,
+        default=(0.3, 8.0),
+        metavar=("OPACITY", "PX"),
+        help="bookmark hover opacity and extra hitbox radius (default: 0.3 8)",
     )
     parser.add_argument(
-        "--home-opacity", type=opacity, default=1.0, metavar="F",
-        help="home point opacity 0-1 (default: 1)",
+        "--home-hitbox",
+        nargs=2,
+        type=float,
+        default=(0.3, 8.0),
+        metavar=("OPACITY", "PX"),
+        help="home hover opacity and extra hitbox radius (default: 0.3 8)",
     )
     parser.add_argument(
-        "--bookmark-size", type=nonnegative_int, default=5, metavar="PX",
-        help="bookmark point diameter; 0 disables bookmarks (default: 5)",
-    )
-    parser.add_argument(
-        "--home-size", type=nonnegative_int, default=5, metavar="PX",
-        help="home point diameter; 0 disables home (default: 5)",
-    )
-    parser.add_argument(
-        "--dot-hitbox", type=nonnegative_int, default=10, metavar="PX",
-        help="extra point hitbox radius in pixels (default: 10)",
+        "--dot-radius", type=nonnegative_float, default=2, metavar="PX",
+        help="home and bookmark point radius (default: 2)",
     )
     parser.add_argument(
         "--canvas-radius", "--radius", dest="canvas_radius",
@@ -297,11 +287,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     args = parser.parse_args(argv)
     if args.toggle is not None:
-        scale, alpha = args.toggle
-        if not math.isfinite(scale) or scale <= 0:
-            parser.error("--toggle X must be greater than zero")
+        scale_value, canvas_value = args.toggle
+        try:
+            scale = positive_float(scale_value)
+            canvas = parse_rgba(canvas_value)
+        except argparse.ArgumentTypeError as error:
+            parser.error(f"--toggle: {error}")
+        args.toggle = (scale, canvas)
+    for flag, values in (
+        ("--bookmark-hitbox", args.bookmark_hitbox),
+        ("--home-hitbox", args.home_hitbox),
+    ):
+        alpha, radius = values
         if not math.isfinite(alpha) or not 0 <= alpha <= 1:
-            parser.error("--toggle Y must be between 0 and 1")
+            parser.error(f"{flag} OPACITY must be between 0 and 1")
+        if not math.isfinite(radius) or radius < 0:
+            parser.error(f"{flag} PX must be zero or greater")
     return args
 
 
@@ -370,9 +371,10 @@ class Marker:
     action: str
     x: float
     y: float
-    diameter: int
-    color: tuple[float, float, float]
-    opacity: float
+    radius: float
+    color: tuple[float, float, float, float]
+    hover_opacity: float
+    hitbox_padding: float
 
 
 def load_snap_config() -> SnapConfig:
@@ -1218,9 +1220,7 @@ class MinimapWindow(Gtk.ApplicationWindow):
         self.window_rects = []
         self.marker_hits = []
 
-        context.set_source_rgba(
-            *self.config.canvas_color, self.config.canvas_opacity
-        )
+        context.set_source_rgba(*self.config.canvas)
         if self.config.canvas_radius == 0:
             context.rectangle(0, 0, width, height)
         else:
@@ -1244,12 +1244,12 @@ class MinimapWindow(Gtk.ApplicationWindow):
             draw_height = max(window_height * canvas_scale, 1)
 
             if window.get("is_focused"):
-                color = self.config.active_window_color
+                color = self.config.active_window
             elif window.get("suspended"):
-                color = self.config.suspended_color
+                color = self.config.suspended
             else:
-                color = self.config.window_color
-            context.set_source_rgba(*color, self.config.window_opacity)
+                color = self.config.window
+            context.set_source_rgba(*color)
             rounded_rectangle(
                 context,
                 draw_x,
@@ -1263,9 +1263,7 @@ class MinimapWindow(Gtk.ApplicationWindow):
                 0, (window, draw_x, draw_y, draw_width, draw_height)
             )
 
-        context.set_source_rgba(
-            *self.config.frame_color, self.config.frame_opacity
-        )
+        context.set_source_rgba(*self.config.frame)
         context.set_line_width(self.config.frame_width)
         outputs = self.state.get("outputs", [])
         ordered_outputs = sorted(outputs, key=lambda item: bool(item.get("active")))
@@ -1286,42 +1284,45 @@ class MinimapWindow(Gtk.ApplicationWindow):
             context.stroke()
 
         markers: list[Marker] = []
-        if self.config.bookmark_size > 0:
-            markers.extend(
-                Marker(
-                    action=f"go-to-bookmark {name}",
-                    x=point[0],
-                    y=point[1],
-                    diameter=self.config.bookmark_size,
-                    color=self.config.bookmarks_color,
-                    opacity=self.config.bookmarks_opacity,
-                )
-                for name, point in self.bookmarks.items()
+        bookmark_hover_opacity, bookmark_hitbox_padding = (
+            self.config.bookmark_hitbox
+        )
+        markers.extend(
+            Marker(
+                action=f"go-to-bookmark {name}",
+                x=point[0],
+                y=point[1],
+                radius=self.config.dot_radius,
+                color=self.config.bookmarks,
+                hover_opacity=bookmark_hover_opacity,
+                hitbox_padding=bookmark_hitbox_padding,
             )
-        if self.config.home_size > 0:
-            markers.append(
-                Marker(
-                    action="home-toggle",
-                    x=0.0,
-                    y=0.0,
-                    diameter=self.config.home_size,
-                    color=self.config.home_color,
-                    opacity=self.config.home_opacity,
-                )
+            for name, point in self.bookmarks.items()
+        )
+        home_hover_opacity, home_hitbox_padding = self.config.home_hitbox
+        markers.append(
+            Marker(
+                action="home-toggle",
+                x=0.0,
+                y=0.0,
+                radius=self.config.dot_radius,
+                color=self.config.home,
+                hover_opacity=home_hover_opacity,
+                hitbox_padding=home_hitbox_padding,
             )
+        )
         for marker in markers:
             marker_x = center_x + (marker.x - camera_x) * canvas_scale
             marker_y = center_y - (marker.y - camera_y) * canvas_scale
-            radius = marker.diameter / 2
-            hit_radius = radius + self.config.dot_hitbox
+            hit_radius = marker.radius + marker.hitbox_padding
             if marker.action == self.hovered_marker:
                 context.set_source_rgba(
-                    *marker.color, self.config.canvas_opacity
+                    *marker.color[:3], marker.hover_opacity
                 )
                 context.arc(marker_x, marker_y, hit_radius, 0, math.tau)
                 context.fill()
-            context.set_source_rgba(*marker.color, marker.opacity)
-            context.arc(marker_x, marker_y, radius, 0, math.tau)
+            context.set_source_rgba(*marker.color)
+            context.arc(marker_x, marker_y, marker.radius, 0, math.tau)
             context.fill()
             self.marker_hits.append(
                 (marker.action, marker_x, marker_y, hit_radius)
@@ -1358,7 +1359,7 @@ class MinimapApplication(Gtk.Application):
         self.maps_visible = False
         self.profile = "normal"
         self.profile_scale = 1.0
-        self.profile_opacity = 1.0
+        self.profile_canvas = config.canvas
 
     def _profile_config(self) -> argparse.Namespace:
         values = vars(self.base_config).copy()
@@ -1366,9 +1367,7 @@ class MinimapApplication(Gtk.Application):
             values["width"] = max(1, round(values["width"] * self.profile_scale))
             values["height"] = max(1, round(values["height"] * self.profile_scale))
         if self.profile != "normal":
-            values["canvas_opacity"] = self.profile_opacity
-            values["window_opacity"] = self.profile_opacity
-            values["frame_opacity"] = self.profile_opacity
+            values["canvas"] = self.profile_canvas
         if self.profile == "fullscreen":
             values["canvas_radius"] = 0
         return argparse.Namespace(**values)
@@ -1395,20 +1394,20 @@ class MinimapApplication(Gtk.Application):
             self.maps_visible = not self.maps_visible
             self._update_window_visibility()
         elif command.startswith("toggle:"):
-            _, scale, alpha = command.split(":")
+            _, scale, canvas = command.split(":")
             if self.profile == "large":
                 self.profile = "normal"
             else:
                 self.profile = "large"
                 self.profile_scale = float(scale)
-                self.profile_opacity = float(alpha)
+                self.profile_canvas = parse_rgba(canvas)
             self._apply_profile()
         elif command.startswith("toggle-fullscreen:"):
             if self.profile == "fullscreen":
                 self.profile = "normal"
             else:
                 self.profile = "fullscreen"
-                self.profile_opacity = float(command.partition(":")[2])
+                self.profile_canvas = parse_rgba(command.partition(":")[2])
             self._apply_profile()
 
     def do_activate(self) -> None:
@@ -1438,24 +1437,27 @@ class MinimapApplication(Gtk.Application):
 
         if first_run:
             if requested.toggle is not None:
-                scale, alpha = requested.toggle
+                scale, canvas = requested.toggle
                 self.profile = "large"
                 self.profile_scale = scale
-                self.profile_opacity = alpha
+                self.profile_canvas = canvas
                 self._apply_profile()
             elif requested.toggle_fullscreen is not None:
                 self.profile = "fullscreen"
-                self.profile_opacity = requested.toggle_fullscreen
+                self.profile_canvas = requested.toggle_fullscreen
                 self._apply_profile()
         else:
             if requested.show:
                 self._handle_command("show")
             elif requested.toggle is not None:
-                scale, alpha = requested.toggle
-                self._handle_command(f"toggle:{scale}:{alpha}")
+                scale, canvas = requested.toggle
+                self._handle_command(
+                    f"toggle:{scale}:{format_rgba(canvas)}"
+                )
             elif requested.toggle_fullscreen is not None:
                 self._handle_command(
-                    f"toggle-fullscreen:{requested.toggle_fullscreen}"
+                    "toggle-fullscreen:"
+                    f"{format_rgba(requested.toggle_fullscreen)}"
                 )
         return 0
 
