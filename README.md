@@ -6,11 +6,10 @@ infinite canvas through its IPC state subscription and renders one Layer Shell
 overlay on every monitor.
 
 The compact map is fully click-through. It shows normal, focused, and suspended
-windows, plus the viewport frames of all connected outputs.
+windows, the viewport frames of all connected outputs, Driftwm bookmarks, and
+the canvas home point.
 
 <img width="960" height="540" alt="Driftmap screenshot" src="https://github.com/user-attachments/assets/19332087-7939-4c80-8571-acb5f5e5c4ff" />
-
-https://github.com/user-attachments/assets/00316dc0-1e01-428c-b349-e8ed278705a7
 
 ## Installation
 
@@ -66,35 +65,32 @@ Each invocation toggles visibility without terminating the background process.
 ### Interactive scaled mode
 
 ```sh
-driftmap --toggle 2 0.8
+driftmap --toggle 2 242424cc
 ```
 
-`2` is the width and height multiplier; `0.8` is the opacity from `0` to `1`.
-The example changes a `320×180` map into `640×360` and sets the canvas,
-windows, and viewport frames to `0.8` opacity.
+The first argument is the width and height multiplier. The second is the canvas
+color in `RRGGBBAA` format. The example changes a `320×180` map into `640×360`
+and uses `#242424` with 80% opacity for that profile's canvas.
 
-The interactive profile keeps the startup colors, position, zoom, radii, and
-other settings. Calling the same toggle again returns to the compact
+The interactive profile keeps the remaining startup colors, position, zoom,
+radii, and other settings. Calling the toggle again returns to the compact
 click-through profile. Switching profiles resets the minimap's interactive
 camera, zoom animation, drag state, and snap state.
-
-<img width="960" height="540" alt="image" src="https://github.com/user-attachments/assets/c5f911bd-5121-4341-8ed3-a3150baab07c" />
 
 ### Interactive fullscreen mode
 
 ```sh
-driftmap --toggle-fullscreen 0.9
+driftmap --toggle-fullscreen 242424e6
 ```
 
-The argument is the canvas, window, and viewport-frame opacity. The surface is
-anchored to all four output edges and sized by the compositor, so it covers the
-monitor without gaps. Canvas corner rounding is forced off in this mode.
+The argument is the fullscreen profile's canvas color in `RRGGBBAA` format.
+The surface is anchored to all four output edges and sized by the compositor,
+so it covers the monitor without gaps. Canvas corner rounding is forced off in
+this mode.
 
 Calling the command again returns to the compact click-through profile.
 Fullscreen mode remains visible even when Driftwm has a fullscreen client on
 that output.
-
-<img width="960" height="540" alt="image" src="https://github.com/user-attachments/assets/5e285a97-d0c8-4e02-bf1b-e4e3fc348dfd" />
 
 ## Interactive controls
 
@@ -103,6 +99,8 @@ Controls are enabled in scaled and fullscreen modes:
 | Input | Result |
 | --- | --- |
 | Left click a window | Focus the window and center the Driftwm viewport on it |
+| Left click a bookmark | Run `go-to-bookmark` for that bookmark |
+| Left click home | Run `home-toggle` |
 | Middle click a window | Close that exact window by its stable Driftwm ID |
 | Right-drag a window | Move it on the real Driftwm canvas |
 | Left-drag empty space | Pan the minimap's independent camera |
@@ -114,7 +112,8 @@ animation speed as Driftwm. Panning and zooming affect only the minimap; they do
 not move the real Driftwm viewport.
 
 Window clicks and drags use stable window IDs from Driftwm IPC, so overlapping
-windows and suspended stand-ins can be targeted individually.
+windows and suspended stand-ins can be targeted individually. Bookmark and home
+hitboxes are highlighted when the pointer enters them.
 
 ## Window snapping
 
@@ -170,13 +169,13 @@ Example autostart and keybindings:
 
 ```toml
 autostart = [
-  "driftmap",
+  "driftmap --snap 8",
 ]
 
 [keybindings]
 "mod+u" = "spawn driftmap --show"
-"mod+i" = "spawn driftmap --toggle 2 0.8"
-"mod+o" = "spawn driftmap --toggle-fullscreen 0.9"
+"mod+i" = "spawn driftmap --toggle 2 242424cc"
+"mod+o" = "spawn driftmap --toggle-fullscreen 242424e6"
 ```
 
 ## Appearance and placement
@@ -198,32 +197,40 @@ autostart = [
 --margin PX
     Distance from anchored screen edges. Default: 10.
 
---canvas-color HEX, --bg-color HEX
-    Canvas background color. Default: #242424.
+--canvas RRGGBBAA
+    Canvas color and opacity. Default: 2424244d.
 
---canvas-opacity F, --bg-opacity F
-    Compact canvas opacity from 0 to 1. Default: 0.3.
+--window RRGGBBAA
+    Normal window color and opacity. Default: b8bfd14d.
 
---window-color HEX
-    Normal window color. Default: #b8bfd1.
+--active-window RRGGBBAA
+    Focused window color and opacity. Default: 59b8ff4d.
 
---active-window-color HEX, --focused-color HEX
-    Focused window color. Default: #59b8ff.
+--suspended RRGGBBAA
+    Suspended stand-in color and opacity. Default: 8f94a64d.
 
---suspended-color HEX
-    Suspended stand-in color. Default: #8f94a6.
-
---window-opacity F
-    Compact window opacity from 0 to 1. Default: 0.3.
-
---frame-color HEX, --viewport-color HEX
-    Output viewport-frame color. Default: #f6e380.
-
---frame-opacity F, --viewport-opacity F
-    Compact viewport-frame opacity from 0 to 1. Default: 0.4.
+--frame RRGGBBAA
+    Output viewport-frame color and opacity. Default: f6e38066.
 
 --frame-width PX, --viewport-width PX
     Viewport outline width. Default: 1.
+
+--bookmarks RRGGBBAA
+    Bookmark point color and opacity. Default: ff8a6699.
+
+--home RRGGBBAA
+    Home point color and opacity. Default: 66e0a399.
+
+--bookmark-hitbox OPACITY PX
+    Bookmark hover-highlight opacity and extra hitbox radius.
+    Default: 0.3 8.
+
+--home-hitbox OPACITY PX
+    Home hover-highlight opacity and extra hitbox radius.
+    Default: 0.3 8.
+
+--dot-radius PX
+    Radius shared by bookmark and home points. Default: 2.
 
 --canvas-radius PX, --radius PX
     Canvas corner radius. Zero disables rounding. Default: 12.
@@ -232,8 +239,9 @@ autostart = [
     Window corner radius. Default: 3.
 ```
 
-Colors accept six-digit hexadecimal values. Quote values beginning with `#` in
-the shell.
+Colors use eight hexadecimal characters in `RRGGBBAA` order. The final byte is
+the alpha channel: `00` is transparent and `ff` is opaque. Do not include `#`,
+so shell quoting is unnecessary.
 
 Complete example:
 
@@ -244,20 +252,21 @@ driftmap \
   --zoom 0.15 \
   --position bottom-left \
   --margin 10 \
-  --canvas-color '#242424' \
-  --canvas-opacity 0.3 \
-  --window-color '#b8bfd1' \
-  --active-window-color '#59b8ff' \
-  --suspended-color '#8f94a6' \
-  --window-opacity 0.3 \
-  --frame-color '#f6e380' \
-  --frame-opacity 0.4 \
+  --canvas 2424244d \
+  --window b8bfd14d \
+  --active-window 59b8ff4d \
+  --suspended 8f94a64d \
+  --frame f6e38066 \
   --frame-width 1 \
+  --bookmarks ff8a6699 \
+  --home 66e0a399 \
+  --bookmark-hitbox 0.3 8 \
+  --home-hitbox 0.3 8 \
+  --dot-radius 2 \
   --canvas-radius 12 \
   --window-radius 3 \
   --snap 8 \
-# --show-fullscreen \   #<-- show map when fullscreen  
-# --snap-off   #<-- can not be use with --snap <PX>
+  --show-fullscreen
 ```
 
 Run `driftmap --help` for the generated command-line reference.
@@ -270,6 +279,4 @@ Visibility toggling does not terminate the process. Stop it with:
 pkill -f driftmap
 ```
 
-# Inspired by
-[Just Enough Shell](https://github.com/ORFLEM/just_enough_shell)
-[Touchview & Keyview](https://github.com/malbiruk/touchview)
+https://github.com/user-attachments/assets/01435579-189a-4176-ae45-6ff9a45c2b26
