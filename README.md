@@ -10,10 +10,7 @@ windows, plus the viewport frames of all connected outputs.
 
 <img width="960" height="540" alt="Driftmap screenshot" src="https://github.com/user-attachments/assets/19332087-7939-4c80-8571-acb5f5e5c4ff" />
 
-
-https://github.com/user-attachments/assets/0a6e52c9-3356-4f2c-9560-87f84078d3d5
-
-
+https://github.com/user-attachments/assets/00316dc0-1e01-428c-b349-e8ed278705a7
 
 ## Installation
 
