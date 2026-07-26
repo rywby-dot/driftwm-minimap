@@ -137,8 +137,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--canvas-opacity", "--bg-opacity", dest="canvas_opacity",
-        type=opacity, default=0.45, metavar="F",
-        help="canvas background opacity 0-1 (default: 0.45)",
+        type=opacity, default=0.3, metavar="F",
+        help="canvas background opacity 0-1 (default: 0.3)",
     )
     parser.add_argument(
         "--window-color", type=parse_hex_color, default=(0.72, 0.75, 0.82),
@@ -154,8 +154,8 @@ def parse_args() -> argparse.Namespace:
         metavar="HEX", help="suspended window color (default: #8f94a6)",
     )
     parser.add_argument(
-        "--window-opacity", type=opacity, default=0.4, metavar="F",
-        help="all window opacity 0-1 (default: 0.4)",
+        "--window-opacity", type=opacity, default=0.3, metavar="F",
+        help="all window opacity 0-1 (default: 0.3)",
     )
     parser.add_argument(
         "--frame-color", "--viewport-color", dest="frame_color",
@@ -164,8 +164,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--frame-opacity", "--viewport-opacity", dest="frame_opacity",
-        type=opacity, default=0.5, metavar="F",
-        help="current viewport outline opacity 0-1 (default: 0.5)",
+        type=opacity, default=0.4, metavar="F",
+        help="current viewport outline opacity 0-1 (default: 0.4)",
     )
     parser.add_argument(
         "--frame-width", "--viewport-width", dest="frame_width",
