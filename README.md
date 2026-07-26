@@ -269,3 +269,7 @@ Visibility toggling does not terminate the process. Stop it with:
 ```sh
 pkill -f driftmap
 ```
+
+# Inspired by
+[Just Enough Shell](https://github.com/ORFLEM/just_enough_shell)
+[Touchview & Keyview](https://github.com/malbiruk/touchview)
