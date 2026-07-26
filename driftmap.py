@@ -18,6 +18,12 @@ from typing import Any
 LAYER_SHELL_LIBRARY = "libgtk4-layer-shell.so"
 
 
+def is_rgba_hex(value: str) -> bool:
+    return len(value) == 8 and all(
+        character in "0123456789abcdefABCDEF" for character in value
+    )
+
+
 def control_socket_path() -> Path:
     runtime_dir = os.environ.get("XDG_RUNTIME_DIR", "/tmp")
     display = os.environ.get("WAYLAND_DISPLAY", "wayland")
@@ -32,18 +38,16 @@ def send_fast_control_command() -> None:
         command = "show"
     elif len(arguments) == 3 and arguments[0] == "--toggle":
         try:
-            scale, alpha = float(arguments[1]), float(arguments[2])
+            scale = float(arguments[1])
         except ValueError:
             return
-        if math.isfinite(scale) and scale > 0 and math.isfinite(alpha) and 0 <= alpha <= 1:
-            command = f"toggle:{scale}:{alpha}"
+        canvas = arguments[2]
+        if math.isfinite(scale) and scale > 0 and is_rgba_hex(canvas):
+            command = f"toggle:{scale}:{canvas}"
     elif len(arguments) == 2 and arguments[0] == "--toggle-fullscreen":
-        try:
-            alpha = float(arguments[1])
-        except ValueError:
-            return
-        if math.isfinite(alpha) and 0 <= alpha <= 1:
-            command = f"toggle-fullscreen:{alpha}"
+        canvas = arguments[1]
+        if is_rgba_hex(canvas):
+            command = f"toggle-fullscreen:{canvas}"
     if command is None:
         return
     if not os.environ.get("WAYLAND_DISPLAY"):
@@ -112,28 +116,32 @@ POSITION_ANCHORS = {
 }
 
 
-def parse_hex_color(value: str) -> tuple[float, float, float]:
-    value = value.lstrip("#")
-    if len(value) != 6:
-        raise argparse.ArgumentTypeError(f"invalid color: #{value}")
-    try:
-        red, green, blue = int(value[:2], 16), int(value[2:4], 16), int(value[4:], 16)
-    except ValueError as error:
-        raise argparse.ArgumentTypeError(f"invalid color: #{value}") from error
-    return red / 255, green / 255, blue / 255
+def parse_rgba(value: str) -> tuple[float, float, float, float]:
+    if not is_rgba_hex(value):
+        raise argparse.ArgumentTypeError(
+            "must be exactly 8 hexadecimal characters (RRGGBBAA)"
+        )
+    return tuple(
+        int(value[index:index + 2], 16) / 255
+        for index in range(0, 8, 2)
+    )
 
 
-def opacity(value: str) -> float:
-    number = float(value)
-    if not 0 <= number <= 1:
-        raise argparse.ArgumentTypeError("must be between 0 and 1")
-    return number
+def format_rgba(color: tuple[float, float, float, float]) -> str:
+    return "".join(f"{round(channel * 255):02x}" for channel in color)
 
 
 def positive_float(value: str) -> float:
     number = float(value)
     if not math.isfinite(number) or number <= 0:
         raise argparse.ArgumentTypeError("must be greater than zero")
+    return number
+
+
+def nonnegative_float(value: str) -> float:
+    number = float(value)
+    if not math.isfinite(number) or number < 0:
+        raise argparse.ArgumentTypeError("must be zero or greater")
     return number
 
 
@@ -162,15 +170,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     command.add_argument(
         "--toggle",
         nargs=2,
-        type=float,
-        metavar=("X", "Y"),
-        help="toggle a profile with size multiplier X and opacity Y",
+        metavar=("SCALE", "RRGGBBAA"),
+        help="toggle a scaled profile with the given canvas RGBA",
     )
     command.add_argument(
         "--toggle-fullscreen",
-        type=opacity,
-        metavar="Y",
-        help="toggle an interactive fullscreen profile with opacity Y",
+        type=parse_rgba,
+        metavar="RRGGBBAA",
+        help="toggle a fullscreen profile with the given canvas RGBA",
     )
     snap = parser.add_mutually_exclusive_group()
     snap.add_argument(
@@ -212,46 +219,57 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="distance from anchored screen edges (default: 10)",
     )
     parser.add_argument(
-        "--canvas-color", "--bg-color", dest="canvas_color",
-        type=parse_hex_color, default=(0.0176, 0.0176, 0.0176),
-        metavar="HEX", help="background color (default: #242424)",
+        "--canvas", type=parse_rgba, default=parse_rgba("2424244d"),
+        metavar="RRGGBBAA", help="canvas color and opacity (default: 2424244d)",
     )
     parser.add_argument(
-        "--canvas-opacity", "--bg-opacity", dest="canvas_opacity",
-        type=opacity, default=0.3, metavar="F",
-        help="canvas background opacity 0-1 (default: 0.3)",
+        "--window", type=parse_rgba, default=parse_rgba("b8bfd14d"),
+        metavar="RRGGBBAA", help="normal window RGBA (default: b8bfd14d)",
     )
     parser.add_argument(
-        "--window-color", type=parse_hex_color, default=(0.72, 0.75, 0.82),
-        metavar="HEX", help="normal window color (default: #b8bfd1)",
+        "--active-window", type=parse_rgba, default=parse_rgba("59b8ff4d"),
+        metavar="RRGGBBAA", help="focused window RGBA (default: 59b8ff4d)",
     )
     parser.add_argument(
-        "--active-window-color", "--focused-color", dest="active_window_color",
-        type=parse_hex_color, default=(0.35, 0.72, 1.0),
-        metavar="HEX", help="focused window color (default: #59b8ff)",
+        "--suspended", type=parse_rgba, default=parse_rgba("8f94a64d"),
+        metavar="RRGGBBAA", help="suspended window RGBA (default: 8f94a64d)",
     )
     parser.add_argument(
-        "--suspended-color", type=parse_hex_color, default=(0.56, 0.58, 0.65),
-        metavar="HEX", help="suspended window color (default: #8f94a6)",
-    )
-    parser.add_argument(
-        "--window-opacity", type=opacity, default=0.3, metavar="F",
-        help="all window opacity 0-1 (default: 0.3)",
-    )
-    parser.add_argument(
-        "--frame-color", "--viewport-color", dest="frame_color",
-        type=parse_hex_color, default=(0.9216, 0.7682, 0.2159),
-        metavar="HEX", help="current viewport outline color (default: #f6e380)",
-    )
-    parser.add_argument(
-        "--frame-opacity", "--viewport-opacity", dest="frame_opacity",
-        type=opacity, default=0.4, metavar="F",
-        help="current viewport outline opacity 0-1 (default: 0.4)",
+        "--frame", type=parse_rgba, default=parse_rgba("f6e38066"),
+        metavar="RRGGBBAA", help="viewport frame RGBA (default: f6e38066)",
     )
     parser.add_argument(
         "--frame-width", "--viewport-width", dest="frame_width",
         type=positive_float, default=1.0, metavar="PX",
         help="current viewport outline width (default: 1)",
+    )
+    parser.add_argument(
+        "--bookmarks", type=parse_rgba, default=parse_rgba("ff8a6699"),
+        metavar="RRGGBBAA", help="bookmark point RGBA (default: ff8a6699)",
+    )
+    parser.add_argument(
+        "--home", type=parse_rgba, default=parse_rgba("66e0a399"),
+        metavar="RRGGBBAA", help="home point RGBA (default: 66e0a399)",
+    )
+    parser.add_argument(
+        "--bookmark-hitbox",
+        nargs=2,
+        type=float,
+        default=(0.3, 8.0),
+        metavar=("OPACITY", "PX"),
+        help="bookmark hover opacity and extra hitbox radius (default: 0.3 8)",
+    )
+    parser.add_argument(
+        "--home-hitbox",
+        nargs=2,
+        type=float,
+        default=(0.3, 8.0),
+        metavar=("OPACITY", "PX"),
+        help="home hover opacity and extra hitbox radius (default: 0.3 8)",
+    )
+    parser.add_argument(
+        "--dot-radius", type=nonnegative_float, default=2, metavar="PX",
+        help="home and bookmark point radius (default: 2)",
     )
     parser.add_argument(
         "--canvas-radius", "--radius", dest="canvas_radius",
@@ -269,11 +287,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     args = parser.parse_args(argv)
     if args.toggle is not None:
-        scale, alpha = args.toggle
-        if not math.isfinite(scale) or scale <= 0:
-            parser.error("--toggle X must be greater than zero")
+        scale_value, canvas_value = args.toggle
+        try:
+            scale = positive_float(scale_value)
+            canvas = parse_rgba(canvas_value)
+        except argparse.ArgumentTypeError as error:
+            parser.error(f"--toggle: {error}")
+        args.toggle = (scale, canvas)
+    for flag, values in (
+        ("--bookmark-hitbox", args.bookmark_hitbox),
+        ("--home-hitbox", args.home_hitbox),
+    ):
+        alpha, radius = values
         if not math.isfinite(alpha) or not 0 <= alpha <= 1:
-            parser.error("--toggle Y must be between 0 and 1")
+            parser.error(f"{flag} OPACITY must be between 0 and 1")
+        if not math.isfinite(radius) or radius < 0:
+            parser.error(f"{flag} PX must be zero or greater")
     return args
 
 
@@ -335,6 +364,17 @@ class SnapConfig:
 class AxisSnap:
     snapped_pos: float
     natural_at_engage: float
+
+
+@dataclass(frozen=True)
+class Marker:
+    action: str
+    x: float
+    y: float
+    radius: float
+    color: tuple[float, float, float, float]
+    hover_opacity: float
+    hitbox_padding: float
 
 
 def load_snap_config() -> SnapConfig:
@@ -456,19 +496,27 @@ def update_axis_snap(
 
 
 class StateSubscription:
-    def __init__(self, on_state) -> None:
+    def __init__(self, on_state, on_bookmarks) -> None:
         self.on_state = on_state
+        self.on_bookmarks = on_bookmarks
         self.connection: socket.socket | None = None
         self.source_id: int | None = None
         self.buffer = bytearray()
         self.retry_id: int | None = None
+        self.bookmark_poll_id: int | None = None
 
     def start(self) -> None:
         self._connect()
+        self.bookmark_poll_id = GLib.timeout_add_seconds(
+            1, self._request_bookmarks
+        )
 
     def stop(self) -> None:
         if self.retry_id is not None:
             GLib.source_remove(self.retry_id)
+        if self.bookmark_poll_id is not None:
+            GLib.source_remove(self.bookmark_poll_id)
+            self.bookmark_poll_id = None
         self._disconnect()
 
     def _connect(self) -> bool:
@@ -476,7 +524,7 @@ class StateSubscription:
         try:
             connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             connection.connect(str(ipc_socket_path()))
-            connection.sendall(b'"Subscribe"\n')
+            connection.sendall(b'"Subscribe"\n{"Bookmark":{}}\n')
             connection.setblocking(False)
         except (OSError, RuntimeError) as error:
             print(f"driftwm-minimap: {error}; retrying", file=sys.stderr)
@@ -493,6 +541,14 @@ class StateSubscription:
             self._on_io,
         )
         return False
+
+    def _request_bookmarks(self) -> bool:
+        if self.connection is not None:
+            try:
+                self.connection.sendall(b'{"Bookmark":{}}\n')
+            except (BlockingIOError, OSError):
+                self._retry()
+        return True
 
     def _disconnect(self) -> None:
         if self.source_id is not None:
@@ -538,6 +594,13 @@ class StateSubscription:
                 continue
             if isinstance(message, dict) and isinstance(message.get("State"), dict):
                 self.on_state(message["State"])
+            bookmarks = (
+                message.get("Ok", {}).get("Bookmarks")
+                if isinstance(message, dict) and isinstance(message.get("Ok"), dict)
+                else None
+            )
+            if isinstance(bookmarks, dict):
+                self.on_bookmarks(bookmarks)
         return True
 
 
@@ -655,8 +718,12 @@ class MinimapWindow(Gtk.ApplicationWindow):
         self.zoom_tick_id: int | None = None
         self.zoom_frame_time: int | None = None
         self.window_rects: list[tuple[dict[str, Any], float, float, float, float]] = []
+        self.bookmarks: dict[str, list[float]] = {}
+        self.marker_hits: list[tuple[str, float, float, float]] = []
+        self.hovered_marker: str | None = None
         self.last_canvas_scale = 1.0
         self.left_press: tuple[float, float, int | None] | None = None
+        self.marker_press: str | None = None
         self.middle_press: tuple[float, float, int | None] | None = None
         self.pan_origin: tuple[float, float] | None = None
         self.move_origin: tuple[int, float, float] | None = None
@@ -741,6 +808,8 @@ class MinimapWindow(Gtk.ApplicationWindow):
             self.zoom_tick_id = None
         self.zoom_frame_time = None
         self.left_press = None
+        self.marker_press = None
+        self.hovered_marker = None
         self.middle_press = None
         self.pan_origin = None
         self.move_origin = None
@@ -786,16 +855,47 @@ class MinimapWindow(Gtk.ApplicationWindow):
         scroll.connect("scroll", self._on_scroll)
         self.area.add_controller(scroll)
 
+        motion = Gtk.EventControllerMotion.new()
+        motion.connect("motion", self._on_pointer_motion)
+        motion.connect("leave", self._on_pointer_leave)
+        self.area.add_controller(motion)
+
     def _window_at(self, x: float, y: float) -> dict[str, Any] | None:
         for window, draw_x, draw_y, draw_width, draw_height in self.window_rects:
             if draw_x <= x <= draw_x + draw_width and draw_y <= y <= draw_y + draw_height:
                 return window
         return None
 
+    def _marker_at(self, x: float, y: float) -> str | None:
+        for action, center_x, center_y, hit_radius in reversed(self.marker_hits):
+            if math.hypot(x - center_x, y - center_y) <= hit_radius:
+                return action
+        return None
+
+    def _on_pointer_motion(
+        self, _controller: Gtk.EventControllerMotion, x: float, y: float
+    ) -> None:
+        marker = self._marker_at(x, y) if self.interactive else None
+        if marker != self.hovered_marker:
+            self.hovered_marker = marker
+            self.area.queue_draw()
+
+    def _on_pointer_leave(
+        self, _controller: Gtk.EventControllerMotion
+    ) -> None:
+        if self.hovered_marker is not None:
+            self.hovered_marker = None
+            self.area.queue_draw()
+
     def _on_button_pressed(
         self, gesture: Gtk.GestureClick, _count: int, x: float, y: float
     ) -> None:
         if not self.interactive:
+            return
+        marker = self._marker_at(x, y)
+        if gesture.get_current_button() == Gdk.BUTTON_PRIMARY and marker is not None:
+            self.marker_press = marker
+            self.left_press = None
             return
         window = self._window_at(x, y)
         window_id = int(window["id"]) if window is not None else None
@@ -810,6 +910,14 @@ class MinimapWindow(Gtk.ApplicationWindow):
         if not self.interactive:
             return
         button = gesture.get_current_button()
+        marker = self._marker_at(x, y)
+        if button == Gdk.BUTTON_PRIMARY and self.marker_press is not None:
+            if marker == self.marker_press:
+                self.command_connection.send({"Action": marker})
+            self.marker_press = None
+            self.left_press = None
+            self.middle_press = None
+            return
         window = self._window_at(x, y)
         if window is None:
             self.left_press = None
@@ -834,6 +942,7 @@ class MinimapWindow(Gtk.ApplicationWindow):
             ):
                 self.command_connection.send({"Close": window_id})
         self.left_press = None
+        self.marker_press = None
         self.middle_press = None
 
     def _ensure_view_camera(self) -> tuple[float, float]:
@@ -849,7 +958,11 @@ class MinimapWindow(Gtk.ApplicationWindow):
         return self.view_camera
 
     def _on_pan_begin(self, _gesture: Gtk.GestureDrag, x: float, y: float) -> None:
-        if not self.interactive or self._window_at(x, y) is not None:
+        if (
+            not self.interactive
+            or self._marker_at(x, y) is not None
+            or self._window_at(x, y) is not None
+        ):
             self.pan_origin = None
             return
         self.pan_origin = self._ensure_view_camera()
@@ -1066,6 +1179,19 @@ class MinimapWindow(Gtk.ApplicationWindow):
         self.state = state
         self.area.queue_draw()
 
+    def update_bookmarks(self, bookmarks: dict[str, Any]) -> None:
+        self.bookmarks = {
+            str(name): [float(point[0]), float(point[1])]
+            for name, point in bookmarks.items()
+            if (
+                isinstance(point, list)
+                and len(point) == 2
+                and all(isinstance(value, (int, float)) for value in point)
+                and all(math.isfinite(float(value)) for value in point)
+            )
+        }
+        self.area.queue_draw()
+
     def _draw(
         self, _area: Gtk.DrawingArea, context: cairo.Context, width: int, height: int
     ) -> None:
@@ -1092,10 +1218,9 @@ class MinimapWindow(Gtk.ApplicationWindow):
         canvas_scale = viewport_zoom * fit_scale * self.config.zoom * self.view_zoom
         self.last_canvas_scale = canvas_scale
         self.window_rects = []
+        self.marker_hits = []
 
-        context.set_source_rgba(
-            *self.config.canvas_color, self.config.canvas_opacity
-        )
+        context.set_source_rgba(*self.config.canvas)
         if self.config.canvas_radius == 0:
             context.rectangle(0, 0, width, height)
         else:
@@ -1119,12 +1244,12 @@ class MinimapWindow(Gtk.ApplicationWindow):
             draw_height = max(window_height * canvas_scale, 1)
 
             if window.get("is_focused"):
-                color = self.config.active_window_color
+                color = self.config.active_window
             elif window.get("suspended"):
-                color = self.config.suspended_color
+                color = self.config.suspended
             else:
-                color = self.config.window_color
-            context.set_source_rgba(*color, self.config.window_opacity)
+                color = self.config.window
+            context.set_source_rgba(*color)
             rounded_rectangle(
                 context,
                 draw_x,
@@ -1138,9 +1263,7 @@ class MinimapWindow(Gtk.ApplicationWindow):
                 0, (window, draw_x, draw_y, draw_width, draw_height)
             )
 
-        context.set_source_rgba(
-            *self.config.frame_color, self.config.frame_opacity
-        )
+        context.set_source_rgba(*self.config.frame)
         context.set_line_width(self.config.frame_width)
         outputs = self.state.get("outputs", [])
         ordered_outputs = sorted(outputs, key=lambda item: bool(item.get("active")))
@@ -1159,6 +1282,51 @@ class MinimapWindow(Gtk.ApplicationWindow):
                 viewport_height,
             )
             context.stroke()
+
+        markers: list[Marker] = []
+        bookmark_hover_opacity, bookmark_hitbox_padding = (
+            self.config.bookmark_hitbox
+        )
+        markers.extend(
+            Marker(
+                action=f"go-to-bookmark {name}",
+                x=point[0],
+                y=point[1],
+                radius=self.config.dot_radius,
+                color=self.config.bookmarks,
+                hover_opacity=bookmark_hover_opacity,
+                hitbox_padding=bookmark_hitbox_padding,
+            )
+            for name, point in self.bookmarks.items()
+        )
+        home_hover_opacity, home_hitbox_padding = self.config.home_hitbox
+        markers.append(
+            Marker(
+                action="home-toggle",
+                x=0.0,
+                y=0.0,
+                radius=self.config.dot_radius,
+                color=self.config.home,
+                hover_opacity=home_hover_opacity,
+                hitbox_padding=home_hitbox_padding,
+            )
+        )
+        for marker in markers:
+            marker_x = center_x + (marker.x - camera_x) * canvas_scale
+            marker_y = center_y - (marker.y - camera_y) * canvas_scale
+            hit_radius = marker.radius + marker.hitbox_padding
+            if marker.action == self.hovered_marker:
+                context.set_source_rgba(
+                    *marker.color[:3], marker.hover_opacity
+                )
+                context.arc(marker_x, marker_y, hit_radius, 0, math.tau)
+                context.fill()
+            context.set_source_rgba(*marker.color)
+            context.arc(marker_x, marker_y, marker.radius, 0, math.tau)
+            context.fill()
+            self.marker_hits.append(
+                (marker.action, marker_x, marker_y, hit_radius)
+            )
 
 
 def rounded_rectangle(
@@ -1183,12 +1351,15 @@ class MinimapApplication(Gtk.Application):
         self.config = config
         self.windows: list[MinimapWindow] = []
         self.state: dict[str, Any] | None = None
-        self.subscription = StateSubscription(self.update_state)
+        self.bookmarks: dict[str, Any] = {}
+        self.subscription = StateSubscription(
+            self.update_state, self.update_bookmarks
+        )
         self.control_server = ControlServer(self._handle_command)
         self.maps_visible = False
         self.profile = "normal"
         self.profile_scale = 1.0
-        self.profile_opacity = 1.0
+        self.profile_canvas = config.canvas
 
     def _profile_config(self) -> argparse.Namespace:
         values = vars(self.base_config).copy()
@@ -1196,9 +1367,7 @@ class MinimapApplication(Gtk.Application):
             values["width"] = max(1, round(values["width"] * self.profile_scale))
             values["height"] = max(1, round(values["height"] * self.profile_scale))
         if self.profile != "normal":
-            values["canvas_opacity"] = self.profile_opacity
-            values["window_opacity"] = self.profile_opacity
-            values["frame_opacity"] = self.profile_opacity
+            values["canvas"] = self.profile_canvas
         if self.profile == "fullscreen":
             values["canvas_radius"] = 0
         return argparse.Namespace(**values)
@@ -1225,20 +1394,20 @@ class MinimapApplication(Gtk.Application):
             self.maps_visible = not self.maps_visible
             self._update_window_visibility()
         elif command.startswith("toggle:"):
-            _, scale, alpha = command.split(":")
+            _, scale, canvas = command.split(":")
             if self.profile == "large":
                 self.profile = "normal"
             else:
                 self.profile = "large"
                 self.profile_scale = float(scale)
-                self.profile_opacity = float(alpha)
+                self.profile_canvas = parse_rgba(canvas)
             self._apply_profile()
         elif command.startswith("toggle-fullscreen:"):
             if self.profile == "fullscreen":
                 self.profile = "normal"
             else:
                 self.profile = "fullscreen"
-                self.profile_opacity = float(command.partition(":")[2])
+                self.profile_canvas = parse_rgba(command.partition(":")[2])
             self._apply_profile()
 
     def do_activate(self) -> None:
@@ -1250,6 +1419,7 @@ class MinimapApplication(Gtk.Application):
                 window = MinimapWindow(self, self.config, monitor)
                 if self.state is not None:
                     window.update_state(self.state)
+                window.update_bookmarks(self.bookmarks)
                 self.windows.append(window)
             self.maps_visible = True
             self._update_window_visibility()
@@ -1267,24 +1437,27 @@ class MinimapApplication(Gtk.Application):
 
         if first_run:
             if requested.toggle is not None:
-                scale, alpha = requested.toggle
+                scale, canvas = requested.toggle
                 self.profile = "large"
                 self.profile_scale = scale
-                self.profile_opacity = alpha
+                self.profile_canvas = canvas
                 self._apply_profile()
             elif requested.toggle_fullscreen is not None:
                 self.profile = "fullscreen"
-                self.profile_opacity = requested.toggle_fullscreen
+                self.profile_canvas = requested.toggle_fullscreen
                 self._apply_profile()
         else:
             if requested.show:
                 self._handle_command("show")
             elif requested.toggle is not None:
-                scale, alpha = requested.toggle
-                self._handle_command(f"toggle:{scale}:{alpha}")
+                scale, canvas = requested.toggle
+                self._handle_command(
+                    f"toggle:{scale}:{format_rgba(canvas)}"
+                )
             elif requested.toggle_fullscreen is not None:
                 self._handle_command(
-                    f"toggle-fullscreen:{requested.toggle_fullscreen}"
+                    "toggle-fullscreen:"
+                    f"{format_rgba(requested.toggle_fullscreen)}"
                 )
         return 0
 
@@ -1293,6 +1466,11 @@ class MinimapApplication(Gtk.Application):
         for window in self.windows:
             window.update_state(state)
         self._update_window_visibility()
+
+    def update_bookmarks(self, bookmarks: dict[str, Any]) -> None:
+        self.bookmarks = bookmarks
+        for window in self.windows:
+            window.update_bookmarks(bookmarks)
 
     def do_shutdown(self) -> None:
         self.control_server.stop()
