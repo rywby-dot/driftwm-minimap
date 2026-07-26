@@ -45,3 +45,6 @@ htmlcov/
 # Operating-system metadata
 .DS_Store
 Thumbs.db
+
+#dop infa
+DRIFTWM/
