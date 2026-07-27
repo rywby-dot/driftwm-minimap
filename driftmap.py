@@ -1363,6 +1363,10 @@ class MinimapApplication(Gtk.Application):
         self.profile = "normal"
         self.profile_scale = 1.0
         self.profile_canvas = config.canvas
+        self.started = False
+        self.monitors: Gio.ListModel | None = None
+        self.monitors_changed_id: int | None = None
+        self.monitor_rebuild_id: int | None = None
 
     def _profile_config(self) -> argparse.Namespace:
         values = vars(self.base_config).copy()
@@ -1392,6 +1396,41 @@ class MinimapApplication(Gtk.Application):
             )
             window.set_visible(self.maps_visible and not fullscreen_hidden)
 
+    def _create_windows(self) -> None:
+        if self.monitors is None:
+            return
+        for index in range(self.monitors.get_n_items()):
+            monitor = self.monitors.get_item(index)
+            window = MinimapWindow(self, self.config, monitor)
+            window.apply_config(
+                self.config, fullscreen=self.profile == "fullscreen"
+            )
+            window.set_interactive(self.profile != "normal")
+            if self.state is not None:
+                window.update_state(self.state)
+            window.update_bookmarks(self.bookmarks)
+            self.windows.append(window)
+        self._update_window_visibility()
+
+    def _schedule_monitor_rebuild(
+        self,
+        _monitors: Gio.ListModel,
+        _position: int,
+        _removed: int,
+        _added: int,
+    ) -> None:
+        if self.monitor_rebuild_id is None:
+            self.monitor_rebuild_id = GLib.idle_add(self._rebuild_windows)
+
+    def _rebuild_windows(self) -> bool:
+        self.monitor_rebuild_id = None
+        old_windows, self.windows = self.windows, []
+        for window in old_windows:
+            window.command_connection.close()
+            window.close()
+        self._create_windows()
+        return False
+
     def _handle_command(self, command: str) -> None:
         if command == "show":
             self.maps_visible = not self.maps_visible
@@ -1414,16 +1453,14 @@ class MinimapApplication(Gtk.Application):
             self._apply_profile()
 
     def do_activate(self) -> None:
-        if not self.windows:
+        if not self.started:
+            self.started = True
             self.control_server.start()
-            monitors = Gdk.Display.get_default().get_monitors()
-            for index in range(monitors.get_n_items()):
-                monitor = monitors.get_item(index)
-                window = MinimapWindow(self, self.config, monitor)
-                if self.state is not None:
-                    window.update_state(self.state)
-                window.update_bookmarks(self.bookmarks)
-                self.windows.append(window)
+            self.monitors = Gdk.Display.get_default().get_monitors()
+            self.monitors_changed_id = self.monitors.connect(
+                "items-changed", self._schedule_monitor_rebuild
+            )
+            self._create_windows()
             self.maps_visible = True
             self._update_window_visibility()
             self.subscription.start()
@@ -1435,7 +1472,7 @@ class MinimapApplication(Gtk.Application):
             for argument in command_line.get_arguments()
         ]
         requested = parse_args(arguments[1:])
-        first_run = not self.windows
+        first_run = not self.started
         self.activate()
 
         if first_run:
@@ -1476,6 +1513,12 @@ class MinimapApplication(Gtk.Application):
             window.update_bookmarks(bookmarks)
 
     def do_shutdown(self) -> None:
+        if self.monitor_rebuild_id is not None:
+            GLib.source_remove(self.monitor_rebuild_id)
+            self.monitor_rebuild_id = None
+        if self.monitors is not None and self.monitors_changed_id is not None:
+            self.monitors.disconnect(self.monitors_changed_id)
+            self.monitors_changed_id = None
         self.control_server.stop()
         self.subscription.stop()
         for window in self.windows:
