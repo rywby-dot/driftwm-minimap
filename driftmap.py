@@ -326,21 +326,45 @@ def active_output(state: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def output_for_monitor(
-    state: dict[str, Any], monitor_name: str | None
+    state: dict[str, Any],
+    monitor_name: str | None = None,
+    monitor_size: tuple[int, int] | None = None,
+    monitor_index: int | None = None,
 ) -> dict[str, Any] | None:
     outputs = state.get("outputs", [])
-    return next(
-        (output for output in outputs if output.get("name") == monitor_name),
-        None,
-    ) or active_output(state)
+    if monitor_name is not None:
+        named = next(
+            (output for output in outputs if output.get("name") == monitor_name),
+            None,
+        )
+        if named is not None:
+            return named
+    if monitor_size is not None:
+        same_size = [
+            output
+            for output in outputs
+            if tuple(output.get("size", ())) == monitor_size
+        ]
+        if len(same_size) == 1:
+            return same_size[0]
+    if monitor_index is not None and 0 <= monitor_index < len(outputs):
+        return outputs[monitor_index]
+    if monitor_name is None and monitor_size is None and monitor_index is None:
+        return active_output(state)
+    return None
 
 
 def monitor_is_fullscreen(
-    state: dict[str, Any] | None, monitor_name: str | None
+    state: dict[str, Any] | None,
+    monitor_name: str | None,
+    monitor_size: tuple[int, int],
+    monitor_index: int,
 ) -> bool:
     if state is None:
         return False
-    output = output_for_monitor(state, monitor_name)
+    output = output_for_monitor(
+        state, monitor_name, monitor_size, monitor_index
+    )
     if output is None:
         return False
     output_name = output.get("name")
@@ -702,10 +726,14 @@ class MinimapWindow(Gtk.ApplicationWindow):
         application: Gtk.Application,
         config: argparse.Namespace,
         monitor: Gdk.Monitor,
+        monitor_index: int,
     ) -> None:
         super().__init__(application=application)
         self.config = config
         self.monitor_name = monitor.get_connector()
+        geometry = monitor.get_geometry()
+        self.monitor_size = (geometry.width, geometry.height)
+        self.monitor_index = monitor_index
         self.state: dict[str, Any] | None = None
         self.command_connection = CommandConnection()
         self.snap_config = load_snap_config()
@@ -949,7 +977,12 @@ class MinimapWindow(Gtk.ApplicationWindow):
         if self.view_camera is not None:
             return self.view_camera
         output = (
-            output_for_monitor(self.state, self.monitor_name)
+            output_for_monitor(
+                self.state,
+                self.monitor_name,
+                self.monitor_size,
+                self.monitor_index,
+            )
             if self.state is not None
             else None
         )
@@ -1197,7 +1230,12 @@ class MinimapWindow(Gtk.ApplicationWindow):
     ) -> None:
         if self.state is None:
             return
-        output = output_for_monitor(self.state, self.monitor_name)
+        output = output_for_monitor(
+            self.state,
+            self.monitor_name,
+            self.monitor_size,
+            self.monitor_index,
+        )
         if output is None:
             return
 
@@ -1392,7 +1430,12 @@ class MinimapApplication(Gtk.Application):
             fullscreen_hidden = (
                 self.profile != "fullscreen"
                 and not self.config.show_fullscreen
-                and monitor_is_fullscreen(self.state, window.monitor_name)
+                and monitor_is_fullscreen(
+                    self.state,
+                    window.monitor_name,
+                    window.monitor_size,
+                    window.monitor_index,
+                )
             )
             window.set_visible(self.maps_visible and not fullscreen_hidden)
 
@@ -1401,7 +1444,7 @@ class MinimapApplication(Gtk.Application):
             return
         for index in range(self.monitors.get_n_items()):
             monitor = self.monitors.get_item(index)
-            window = MinimapWindow(self, self.config, monitor)
+            window = MinimapWindow(self, self.config, monitor, index)
             window.apply_config(
                 self.config, fullscreen=self.profile == "fullscreen"
             )
